@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import os
+import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +23,7 @@ MIN_COMPONENT_SIZE = 32
 DEFAULT_MODEL_REPO = "gegesay89/dental-tooth-segmentation-efficientnet-unet"
 MODEL_FILENAME = "best_model.keras"
 SAMPLE_IMAGE = Path(__file__).parent / "assets" / "final_prediction_comparison.png"
+FEEDBACK_ROOT = Path(os.environ.get("FEEDBACK_DIR", "feedback_submissions"))
 
 
 def dice_coefficient(y_true: Any, y_pred: Any, smooth: float = 1.0) -> Any:
@@ -150,6 +155,85 @@ def image_to_png_bytes(image: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
+def sanitize_filename(filename: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._")
+    return cleaned[:100] or "uploaded_radiograph"
+
+
+def upload_feedback_to_hub(record_dir: Path, submission_id: str) -> str | None:
+    repo_id = os.environ.get("FEEDBACK_DATASET_REPO")
+    token = os.environ.get("FEEDBACK_HF_TOKEN") or os.environ.get("HF_TOKEN")
+    if not repo_id or not token:
+        return None
+
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=token)
+    path_in_repo = f"feedback/{submission_id}"
+    api.upload_folder(
+        repo_id=repo_id,
+        repo_type="dataset",
+        folder_path=str(record_dir),
+        path_in_repo=path_in_repo,
+        commit_message=f"Add segmentation feedback {submission_id}",
+    )
+    return f"https://huggingface.co/datasets/{repo_id}/tree/main/{path_in_repo}"
+
+
+def save_feedback_record(
+    source_image: Image.Image,
+    predicted_mask: Image.Image,
+    overlay_image: Image.Image,
+    uploaded_bytes: bytes,
+    original_filename: str,
+    review_label: str,
+    review_notes: str,
+    threshold: float,
+    foreground_fraction: float,
+) -> tuple[str, str | None]:
+    source_hash = hashlib.sha256(uploaded_bytes).hexdigest()
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    submission_id = f"{timestamp}_{source_hash[:12]}"
+    record_dir = FEEDBACK_ROOT / submission_id
+    record_dir.mkdir(parents=True, exist_ok=True)
+
+    source_path = record_dir / "source.png"
+    mask_path = record_dir / "predicted_mask.png"
+    overlay_path = record_dir / "overlay.png"
+    metadata_path = record_dir / "metadata.json"
+
+    source_image.save(source_path)
+    predicted_mask.save(mask_path)
+    overlay_image.save(overlay_path)
+
+    metadata = {
+        "submission_id": submission_id,
+        "created_at_utc": datetime.now(UTC).isoformat(),
+        "original_filename": sanitize_filename(original_filename),
+        "source_sha256": source_hash,
+        "review_label": review_label,
+        "review_notes": review_notes.strip(),
+        "model_repo": os.environ.get("MODEL_REPO", DEFAULT_MODEL_REPO),
+        "model_filename": MODEL_FILENAME,
+        "inference": {
+            "image_size": {"height": IMAGE_SIZE[0], "width": IMAGE_SIZE[1]},
+            "threshold": threshold,
+            "tta": "horizontal_flip",
+            "min_component_size": MIN_COMPONENT_SIZE,
+        },
+        "source_size": {"width": source_image.width, "height": source_image.height},
+        "foreground_fraction": foreground_fraction,
+        "files": {
+            "source": "source.png",
+            "predicted_mask": "predicted_mask.png",
+            "overlay": "overlay.png",
+        },
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    dataset_url = upload_feedback_to_hub(record_dir, submission_id)
+    return submission_id, dataset_url
+
+
 def segment_image(image: Image.Image, threshold: float) -> tuple[Image.Image, Image.Image, float]:
     model = load_segmentation_model()
     input_array = prepare_image(image, model_input_channels(model))
@@ -198,7 +282,8 @@ if uploaded_file is None:
         if SAMPLE_IMAGE.exists():
             st.image(str(SAMPLE_IMAGE), caption="Example prediction comparison")
 else:
-    source_image = Image.open(uploaded_file).convert("RGB")
+    uploaded_bytes = uploaded_file.getvalue()
+    source_image = Image.open(io.BytesIO(uploaded_bytes)).convert("RGB")
     with st.spinner("Segmenting radiograph"):
         predicted_mask, overlay_image, foreground_fraction = segment_image(
             source_image,
@@ -226,3 +311,43 @@ else:
             file_name="tooth_overlay.png",
             mime="image/png",
         )
+
+    st.divider()
+    st.subheader("Feedback for Retraining")
+    review_label = st.radio(
+        "Is this segmentation correct enough to reuse?",
+        options=["correct", "wrong", "unsure"],
+        format_func={
+            "correct": "Correct",
+            "wrong": "Wrong",
+            "unsure": "Unsure",
+        }.get,
+        horizontal=True,
+    )
+    review_notes = st.text_area("Optional notes", max_chars=500)
+    deidentified = st.checkbox(
+        "I confirm this image is de-identified and can be saved for retraining."
+    )
+    save_clicked = st.button(
+        "Save reviewed case",
+        type="primary",
+        disabled=not deidentified,
+    )
+    if save_clicked:
+        with st.spinner("Saving feedback"):
+            submission_id, dataset_url = save_feedback_record(
+                source_image=source_image,
+                predicted_mask=predicted_mask,
+                overlay_image=overlay_image,
+                uploaded_bytes=uploaded_bytes,
+                original_filename=uploaded_file.name,
+                review_label=review_label,
+                review_notes=review_notes,
+                threshold=threshold,
+                foreground_fraction=foreground_fraction,
+            )
+        st.success(f"Saved feedback case `{submission_id}`.")
+        if dataset_url:
+            st.markdown(f"[Open saved dataset record]({dataset_url})")
+        else:
+            st.info("Saved locally in the Space container; dataset upload is not configured.")
