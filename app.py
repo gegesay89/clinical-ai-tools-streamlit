@@ -19,13 +19,16 @@ from scipy import ndimage
 
 IMAGE_SIZE = (256, 512)
 DEFAULT_THRESHOLD = 0.65
-DEFAULT_CARIES_CONFIDENCE = 0.10
+DEFAULT_CARIES_CONFIDENCE = 0.25
 MIN_COMPONENT_SIZE = 32
 DEFAULT_MODEL_REPO = "gegesay89/dental-tooth-segmentation-efficientnet-unet"
 MODEL_FILENAME = "best_model.keras"
 DEFAULT_CARIES_MODEL_REPO = DEFAULT_MODEL_REPO
 CARIES_MODEL_FILENAME = "caries_yolo_cut.pt"
 CARIES_STANDARD_SIZE = (1536, 768)
+DEFAULT_CARIES_MAX_BOX_AREA = 0.05
+DEFAULT_CARIES_MAX_BOX_WIDTH = 0.30
+DEFAULT_CARIES_MAX_BOX_HEIGHT = 0.35
 SAMPLE_IMAGE = Path(__file__).parent / "assets" / "final_prediction_comparison.png"
 FEEDBACK_ROOT = Path(os.environ.get("FEEDBACK_DIR", "feedback_submissions"))
 
@@ -222,6 +225,21 @@ def map_caries_box(
     )
 
 
+def caries_box_is_reasonable(
+    box: tuple[float, float, float, float],
+    source_size: tuple[int, int],
+) -> bool:
+    x1, y1, x2, y2 = box
+    source_width, source_height = source_size
+    box_width = max(0.0, x2 - x1) / max(1.0, float(source_width))
+    box_height = max(0.0, y2 - y1) / max(1.0, float(source_height))
+    box_area = box_width * box_height
+    max_area = float(os.environ.get("CARIES_MAX_BOX_AREA", DEFAULT_CARIES_MAX_BOX_AREA))
+    max_width = float(os.environ.get("CARIES_MAX_BOX_WIDTH", DEFAULT_CARIES_MAX_BOX_WIDTH))
+    max_height = float(os.environ.get("CARIES_MAX_BOX_HEIGHT", DEFAULT_CARIES_MAX_BOX_HEIGHT))
+    return box_area <= max_area and box_width <= max_width and box_height <= max_height
+
+
 def detect_caries(image: Image.Image, confidence: float) -> list[dict[str, Any]]:
     model = load_caries_model()
     detector_image, crop_info = prepare_caries_input(image)
@@ -246,6 +264,8 @@ def detect_caries(image: Image.Image, confidence: float) -> list[dict[str, Any]]
         xyxy = tuple(float(value) for value in box.xyxy[0].tolist())
         if os.environ.get("CARIES_INPUT_MODE", "original").strip().lower() == "standard_crop":
             xyxy = map_caries_box(xyxy, image.size, crop_info, detector_image.size)
+        if not caries_box_is_reasonable(xyxy, image.size):
+            continue
         detections.append(
             {
                 "box": {
