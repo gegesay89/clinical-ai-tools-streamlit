@@ -19,16 +19,17 @@ from scipy import ndimage
 
 IMAGE_SIZE = (256, 512)
 DEFAULT_THRESHOLD = 0.65
-DEFAULT_CARIES_CONFIDENCE = 0.25
+DEFAULT_CARIES_CONFIDENCE = 0.15
 MIN_COMPONENT_SIZE = 32
 DEFAULT_MODEL_REPO = "gegesay89/dental-tooth-segmentation-efficientnet-unet"
 MODEL_FILENAME = "best_model.keras"
-DEFAULT_CARIES_MODEL_REPO = DEFAULT_MODEL_REPO
-CARIES_MODEL_FILENAME = "caries_yolo_cut.pt"
+DEFAULT_CARIES_MODEL_REPO = "gegesay89/dental-caries-yolo-detector"
+CARIES_MODEL_FILENAME = "caries_detector_kaggle/lesion_yolov8s_p2_896/best_caries_model.pt"
 CARIES_STANDARD_SIZE = (1536, 768)
-DEFAULT_CARIES_MAX_BOX_AREA = 0.05
-DEFAULT_CARIES_MAX_BOX_WIDTH = 0.30
-DEFAULT_CARIES_MAX_BOX_HEIGHT = 0.35
+DEFAULT_CARIES_IMAGE_SIZE = 896
+DEFAULT_CARIES_MAX_BOX_AREA = 0.02
+DEFAULT_CARIES_MAX_BOX_WIDTH = 0.16
+DEFAULT_CARIES_MAX_BOX_HEIGHT = 0.25
 SAMPLE_IMAGE = Path(__file__).parent / "assets" / "final_prediction_comparison.png"
 FEEDBACK_ROOT = Path(os.environ.get("FEEDBACK_DIR", "feedback_submissions"))
 
@@ -244,7 +245,7 @@ def detect_caries(image: Image.Image, confidence: float) -> list[dict[str, Any]]
     model = load_caries_model()
     detector_image, crop_info = prepare_caries_input(image)
     detector_array = np.asarray(detector_image)
-    image_size = int(os.environ.get("CARIES_IMAGE_SIZE", "768"))
+    image_size = int(os.environ.get("CARIES_IMAGE_SIZE", str(DEFAULT_CARIES_IMAGE_SIZE)))
     results = model.predict(
         detector_array,
         conf=confidence,
