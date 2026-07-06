@@ -31,6 +31,7 @@ CARIES_STANDARD_SIZE = (1536, 768)
 DEFAULT_CARIES_IMAGE_SIZE = 640
 DEFAULT_CARIES_SLICED_INFERENCE = True
 DEFAULT_CARIES_SLICED_CONFIDENCE = 0.40
+DEFAULT_CARIES_LOW_CONFIDENCE = 0.20
 DEFAULT_CARIES_SLICE_SIZE = 640
 DEFAULT_CARIES_SLICE_OVERLAP = 0.20
 DEFAULT_CARIES_SLICE_NMS = 0.50
@@ -198,6 +199,11 @@ def env_float(name: str, default: float) -> float:
         return float(value)
     except ValueError:
         return default
+
+
+def caries_low_confidence_threshold(confidence: float) -> float:
+    low_confidence = env_float("CARIES_LOW_CONFIDENCE", DEFAULT_CARIES_LOW_CONFIDENCE)
+    return max(0.01, min(low_confidence, confidence - 0.01))
 
 
 def tooth_roi_from_mask(
@@ -467,6 +473,8 @@ def detect_caries(
 def draw_caries_arrows(
     image: Image.Image,
     detections: list[dict[str, Any]],
+    status_label: str | None = None,
+    low_confidence_detections: list[dict[str, Any]] | None = None,
 ) -> Image.Image:
     overlay = image.convert("RGB").copy()
     draw = ImageDraw.Draw(overlay)
@@ -474,7 +482,18 @@ def draw_caries_arrows(
     line_width = max(3, round(min(width, height) / 180))
     label_font = ImageFont.load_default()
 
-    for detection in detections:
+    def draw_banner(label: str, fill: tuple[int, int, int]) -> None:
+        label_box = draw.textbbox((0, 0), label, font=label_font)
+        label_width = min(width - 16, label_box[2] - label_box[0] + 18)
+        label_height = label_box[3] - label_box[1] + 12
+        draw.rectangle((8, 8, 8 + label_width, 8 + label_height), fill=fill)
+        draw.text((17, 14), label, fill=(255, 255, 255), font=label_font)
+
+    def draw_detection(
+        detection: dict[str, Any],
+        label_prefix: str,
+        color: tuple[int, int, int],
+    ) -> None:
         box = detection["box"]
         x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
         center_x = (x1 + x2) / 2
@@ -487,12 +506,12 @@ def draw_caries_arrows(
 
         draw.rectangle(
             (x1, y1, x2, y2),
-            outline=(255, 214, 64),
+            outline=(255, 214, 64) if label_prefix == "caries" else color,
             width=line_width,
         )
         draw.line(
             (start_x, start_y, center_x, center_y),
-            fill=(230, 37, 37),
+            fill=color,
             width=line_width,
         )
 
@@ -510,9 +529,9 @@ def draw_caries_arrows(
                 tuple(base + normal * arrow_width),
                 tuple(base - normal * arrow_width),
             ]
-            draw.polygon(arrow_points, fill=(230, 37, 37))
+            draw.polygon(arrow_points, fill=color)
 
-        label = f"caries {detection['confidence']:.2f}"
+        label = f"{label_prefix} {detection['confidence']:.2f}"
         label_box = draw.textbbox((0, 0), label, font=label_font)
         label_width = label_box[2] - label_box[0] + 8
         label_height = label_box[3] - label_box[1] + 6
@@ -520,7 +539,7 @@ def draw_caries_arrows(
         label_y = max(0, y1 - label_height - 4)
         draw.rectangle(
             (label_x, label_y, label_x + label_width, label_y + label_height),
-            fill=(230, 37, 37),
+            fill=color,
         )
         draw.text(
             (label_x + 4, label_y + 3),
@@ -528,6 +547,16 @@ def draw_caries_arrows(
             fill=(255, 255, 255),
             font=label_font,
         )
+
+    if detections:
+        for detection in detections:
+            draw_detection(detection, "caries", (230, 37, 37))
+    elif low_confidence_detections:
+        draw_banner(status_label or "Low Confidence Lesions", (207, 92, 0))
+        for detection in low_confidence_detections:
+            draw_detection(detection, "weak", (236, 112, 0))
+    else:
+        draw_banner(status_label or "No Caries Detected", (40, 40, 40))
     return overlay
 
 
@@ -568,6 +597,8 @@ def save_feedback_record(
     overlay_image: Image.Image,
     caries_overlay_image: Image.Image | None,
     caries_detections: list[dict[str, Any]],
+    low_confidence_caries_detections: list[dict[str, Any]],
+    caries_status: str,
     uploaded_bytes: bytes,
     original_filename: str,
     review_label: str,
@@ -618,7 +649,9 @@ def save_feedback_record(
             "min_component_size": MIN_COMPONENT_SIZE,
         },
         "caries_detection": {
+            "status": caries_status,
             "confidence_threshold": caries_confidence,
+            "low_confidence_threshold": caries_low_confidence_threshold(caries_confidence),
             "input_mode": os.environ.get("CARIES_INPUT_MODE", DEFAULT_CARIES_INPUT_MODE),
             "sliced_inference": env_bool(
                 "CARIES_SLICED_INFERENCE",
@@ -634,6 +667,7 @@ def save_feedback_record(
             ),
             "requires_tooth_overlap": env_bool("CARIES_REQUIRE_TOOTH_OVERLAP", True),
             "detections": caries_detections,
+            "low_confidence_detections": low_confidence_caries_detections,
         },
         "source_size": {"width": source_image.width, "height": source_image.height},
         "foreground_fraction": foreground_fraction,
@@ -720,6 +754,8 @@ else:
             threshold,
         )
     caries_error = None
+    caries_status = "No Caries Detected"
+    low_confidence_caries_detections: list[dict[str, Any]] = []
     try:
         with st.spinner("Detecting caries"):
             caries_detections = detect_caries(
@@ -727,9 +763,29 @@ else:
                 caries_confidence,
                 predicted_mask,
             )
-            caries_overlay_image = draw_caries_arrows(source_image, caries_detections)
+            if caries_detections:
+                caries_status = "Caries Candidates Detected"
+            else:
+                low_confidence = caries_low_confidence_threshold(caries_confidence)
+                if low_confidence < caries_confidence:
+                    low_confidence_caries_detections = [
+                        detection
+                        for detection in detect_caries(source_image, low_confidence, predicted_mask)
+                        if detection["confidence"] < caries_confidence
+                    ]
+                if low_confidence_caries_detections:
+                    caries_status = "Low Confidence Lesions"
+                else:
+                    caries_status = "No Caries Detected"
+            caries_overlay_image = draw_caries_arrows(
+                source_image,
+                caries_detections,
+                status_label=caries_status,
+                low_confidence_detections=low_confidence_caries_detections,
+            )
     except Exception as exc:  # noqa: BLE001
         caries_detections = []
+        low_confidence_caries_detections = []
         caries_overlay_image = None
         caries_error = str(exc)
 
@@ -737,7 +793,13 @@ else:
     if caries_error:
         st.warning(f"Caries detector is unavailable: {caries_error}")
     else:
-        st.caption(f"Caries detections: {len(caries_detections)}")
+        if low_confidence_caries_detections and not caries_detections:
+            st.caption(
+                "Caries result: "
+                f"{caries_status} ({len(low_confidence_caries_detections)} weak candidates)"
+            )
+        else:
+            st.caption(f"Caries result: {caries_status} ({len(caries_detections)} candidates)")
 
     source_col, mask_col, overlay_col, caries_col = st.columns(4)
     with source_col:
@@ -803,6 +865,8 @@ else:
                 overlay_image=overlay_image,
                 caries_overlay_image=caries_overlay_image,
                 caries_detections=caries_detections,
+                low_confidence_caries_detections=low_confidence_caries_detections,
+                caries_status=caries_status,
                 uploaded_bytes=uploaded_bytes,
                 original_filename=uploaded_file.name,
                 review_label=review_label,
