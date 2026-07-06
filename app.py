@@ -25,11 +25,15 @@ DEFAULT_MODEL_REPO = "gegesay89/dental-tooth-segmentation-efficientnet-unet"
 MODEL_FILENAME = "best_model.keras"
 DEFAULT_CARIES_MODEL_REPO = "gegesay89/dental-caries-yolo-detector"
 CARIES_MODEL_FILENAME = "caries_detector_kaggle/lesion_yolov8s_p2_896/best_caries_model.pt"
+DEFAULT_CARIES_INPUT_MODE = "tooth_roi"
 CARIES_STANDARD_SIZE = (1536, 768)
 DEFAULT_CARIES_IMAGE_SIZE = 896
 DEFAULT_CARIES_MAX_BOX_AREA = 0.02
 DEFAULT_CARIES_MAX_BOX_WIDTH = 0.16
 DEFAULT_CARIES_MAX_BOX_HEIGHT = 0.25
+DEFAULT_TOOTH_ROI_PADDING_X = 0.08
+DEFAULT_TOOTH_ROI_PADDING_Y = 0.18
+DEFAULT_CARIES_MIN_TOOTH_OVERLAP = 0.05
 SAMPLE_IMAGE = Path(__file__).parent / "assets" / "final_prediction_comparison.png"
 FEEDBACK_ROOT = Path(os.environ.get("FEEDBACK_DIR", "feedback_submissions"))
 
@@ -172,12 +176,96 @@ def build_overlay(source: Image.Image, mask: Image.Image) -> Image.Image:
     return Image.alpha_composite(base, color_layer)
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def tooth_roi_from_mask(
+    mask: Image.Image,
+    source_size: tuple[int, int],
+) -> tuple[float, float, float, float] | None:
+    mask_array = np.asarray(
+        mask.convert("L").resize(source_size, Image.Resampling.NEAREST),
+    )
+    foreground = mask_array > 0
+    if not np.any(foreground):
+        return None
+
+    y_indices, x_indices = np.where(foreground)
+    source_width, source_height = source_size
+    x1 = int(x_indices.min())
+    x2 = int(x_indices.max()) + 1
+    y1 = int(y_indices.min())
+    y2 = int(y_indices.max()) + 1
+
+    pad_x = max(
+        8,
+        round(
+            source_width
+            * env_float("CARIES_TOOTH_ROI_PADDING_X", DEFAULT_TOOTH_ROI_PADDING_X)
+        ),
+    )
+    pad_y = max(
+        8,
+        round(
+            source_height
+            * env_float("CARIES_TOOTH_ROI_PADDING_Y", DEFAULT_TOOTH_ROI_PADDING_Y)
+        ),
+    )
+    left = max(0, x1 - pad_x)
+    top = max(0, y1 - pad_y)
+    right = min(source_width, x2 + pad_x)
+    bottom = min(source_height, y2 + pad_y)
+
+    if right <= left or bottom <= top:
+        return None
+    return (float(left), float(top), float(right - left), float(bottom - top))
+
+
 def prepare_caries_input(
     image: Image.Image,
-) -> tuple[Image.Image, tuple[float, float, float, float]]:
-    mode = os.environ.get("CARIES_INPUT_MODE", "original").strip().lower()
+) -> tuple[Image.Image, tuple[float, float, float, float], str]:
+    return prepare_caries_input_with_mask(image, None)
+
+
+def prepare_caries_input_with_mask(
+    image: Image.Image,
+    tooth_mask: Image.Image | None,
+) -> tuple[Image.Image, tuple[float, float, float, float], str]:
+    mode = os.environ.get("CARIES_INPUT_MODE", DEFAULT_CARIES_INPUT_MODE).strip().lower()
+    if mode == "tooth_roi" and tooth_mask is not None:
+        source = image.convert("RGB")
+        crop_info = tooth_roi_from_mask(tooth_mask, source.size)
+        if crop_info is not None:
+            left, top, crop_width, crop_height = crop_info
+            crop_box = (
+                int(round(left)),
+                int(round(top)),
+                int(round(left + crop_width)),
+                int(round(top + crop_height)),
+            )
+            return source.crop(crop_box), crop_info, mode
+        mode = "original_fallback"
+
     if mode != "standard_crop":
-        return image.convert("RGB"), (0.0, 0.0, float(image.width), float(image.height))
+        return (
+            image.convert("RGB"),
+            (0.0, 0.0, float(image.width), float(image.height)),
+            mode,
+        )
 
     source = image.convert("RGB")
     width, height = source.size
@@ -197,7 +285,7 @@ def prepare_caries_input(
 
     cropped = source.crop((left, top, left + crop_width, top + crop_height))
     resized = cropped.resize(CARIES_STANDARD_SIZE, Image.Resampling.BILINEAR)
-    return resized, (float(left), float(top), float(crop_width), float(crop_height))
+    return resized, (float(left), float(top), float(crop_width), float(crop_height)), mode
 
 
 def map_caries_box(
@@ -241,9 +329,30 @@ def caries_box_is_reasonable(
     return box_area <= max_area and box_width <= max_width and box_height <= max_height
 
 
-def detect_caries(image: Image.Image, confidence: float) -> list[dict[str, Any]]:
+def caries_box_tooth_overlap(
+    box: tuple[float, float, float, float],
+    tooth_mask: Image.Image | None,
+) -> float:
+    if tooth_mask is None:
+        return 1.0
+    x1, y1, x2, y2 = (int(round(value)) for value in box)
+    x1 = max(0, min(tooth_mask.width, x1))
+    y1 = max(0, min(tooth_mask.height, y1))
+    x2 = max(0, min(tooth_mask.width, x2))
+    y2 = max(0, min(tooth_mask.height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    mask_crop = np.asarray(tooth_mask.convert("L").crop((x1, y1, x2, y2))) > 0
+    return float(mask_crop.mean()) if mask_crop.size else 0.0
+
+
+def detect_caries(
+    image: Image.Image,
+    confidence: float,
+    tooth_mask: Image.Image | None = None,
+) -> list[dict[str, Any]]:
     model = load_caries_model()
-    detector_image, crop_info = prepare_caries_input(image)
+    detector_image, crop_info, input_mode = prepare_caries_input_with_mask(image, tooth_mask)
     detector_array = np.asarray(detector_image)
     image_size = int(os.environ.get("CARIES_IMAGE_SIZE", str(DEFAULT_CARIES_IMAGE_SIZE)))
     results = model.predict(
@@ -263,9 +372,20 @@ def detect_caries(image: Image.Image, confidence: float) -> list[dict[str, Any]]
         confidence_score = float(box.conf[0])
         class_id = int(box.cls[0])
         xyxy = tuple(float(value) for value in box.xyxy[0].tolist())
-        if os.environ.get("CARIES_INPUT_MODE", "original").strip().lower() == "standard_crop":
+        if input_mode in {"standard_crop", "tooth_roi"}:
             xyxy = map_caries_box(xyxy, image.size, crop_info, detector_image.size)
         if not caries_box_is_reasonable(xyxy, image.size):
+            continue
+        tooth_overlap = caries_box_tooth_overlap(xyxy, tooth_mask)
+        min_tooth_overlap = env_float(
+            "CARIES_MIN_TOOTH_OVERLAP",
+            DEFAULT_CARIES_MIN_TOOTH_OVERLAP,
+        )
+        if (
+            input_mode == "tooth_roi"
+            and env_bool("CARIES_REQUIRE_TOOTH_OVERLAP", True)
+            and tooth_overlap < min_tooth_overlap
+        ):
             continue
         detections.append(
             {
@@ -278,6 +398,8 @@ def detect_caries(image: Image.Image, confidence: float) -> list[dict[str, Any]]
                 "confidence": confidence_score,
                 "class_id": class_id,
                 "class_name": names.get(class_id, "caries"),
+                "input_mode": input_mode,
+                "tooth_overlap": tooth_overlap,
             }
         )
     return detections
@@ -438,7 +560,12 @@ def save_feedback_record(
         },
         "caries_detection": {
             "confidence_threshold": caries_confidence,
-            "input_mode": os.environ.get("CARIES_INPUT_MODE", "original"),
+            "input_mode": os.environ.get("CARIES_INPUT_MODE", DEFAULT_CARIES_INPUT_MODE),
+            "min_tooth_overlap": env_float(
+                "CARIES_MIN_TOOTH_OVERLAP",
+                DEFAULT_CARIES_MIN_TOOTH_OVERLAP,
+            ),
+            "requires_tooth_overlap": env_bool("CARIES_REQUIRE_TOOTH_OVERLAP", True),
             "detections": caries_detections,
         },
         "source_size": {"width": source_image.width, "height": source_image.height},
@@ -522,7 +649,11 @@ else:
     caries_error = None
     try:
         with st.spinner("Detecting caries"):
-            caries_detections = detect_caries(source_image, caries_confidence)
+            caries_detections = detect_caries(
+                source_image,
+                caries_confidence,
+                predicted_mask,
+            )
             caries_overlay_image = draw_caries_arrows(source_image, caries_detections)
     except Exception as exc:  # noqa: BLE001
         caries_detections = []

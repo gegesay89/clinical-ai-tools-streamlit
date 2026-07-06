@@ -28,10 +28,13 @@ Current caries-arrow defaults:
 
 - `CARIES_MODEL_REPO=gegesay89/dental-caries-yolo-detector`
 - `CARIES_MODEL_FILENAME=caries_detector_kaggle/lesion_yolov8s_p2_896/best_caries_model.pt`
-- `CARIES_INPUT_MODE=original`
+- `CARIES_INPUT_MODE=tooth_roi`
 - `CARIES_IMAGE_SIZE=896`
+- `CARIES_REQUIRE_TOOTH_OVERLAP=true`
 
 The caries layer is a prototype extension. The latest lesion checkpoint has
 Kaggle validation precision 46.5%, recall 35.8%, mAP50 36.8%, and mAP50-95
-12.9%. It is included for caries-arrow demonstration and feedback collection,
-not as diagnostic performance.
+12.9%. The app runs it as a two-stage demo: U-Net first finds the tooth region,
+then YOLO runs on that crop and maps detections back to the original image. It
+is included for caries-arrow demonstration and feedback collection, not as
+diagnostic performance.
