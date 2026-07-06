@@ -704,13 +704,22 @@ st.set_page_config(
 st.title("Dental Tooth Segmentation and Caries Arrows")
 
 with st.sidebar:
-    st.subheader("Final model")
+    st.subheader("Segmentation U-Net")
     st.metric("F1 / Dice", "90.72%")
     st.metric("IoU", "83.02%")
     st.metric("Precision", "89.54%")
     st.metric("Recall", "91.93%")
     st.caption("Educational demo only. Not for clinical diagnosis.")
     st.subheader("Caries detector")
+    st.caption("Prototype YOLO validation metrics")
+    st.metric("Precision", "52.8%")
+    st.metric("Recall", "42.1%")
+    st.metric("mAP50", "37.7%")
+    st.metric("mAP50-95", "12.3%")
+    st.caption(
+        "Caries metrics are artifact-backed Kaggle validation numbers for the "
+        "prototype checkpoint, not diagnostic performance."
+    )
     _sliced_on = env_bool("CARIES_SLICED_INFERENCE", DEFAULT_CARIES_SLICED_INFERENCE)
     _default_caries_conf = (
         DEFAULT_CARIES_SLICED_CONFIDENCE if _sliced_on else DEFAULT_CARIES_CONFIDENCE
