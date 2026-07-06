@@ -13,6 +13,7 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 import numpy as np
 import streamlit as st
+from caries_sliced import sliced_detect
 from huggingface_hub import hf_hub_download
 from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
@@ -24,10 +25,16 @@ MIN_COMPONENT_SIZE = 32
 DEFAULT_MODEL_REPO = "gegesay89/dental-tooth-segmentation-efficientnet-unet"
 MODEL_FILENAME = "best_model.keras"
 DEFAULT_CARIES_MODEL_REPO = "gegesay89/dental-caries-yolo-detector"
-CARIES_MODEL_FILENAME = "caries_detector_kaggle/lesion_yolov8s_p2_896/best_caries_model.pt"
+CARIES_MODEL_FILENAME = "caries_detector_kaggle/sliced_yolov8s_640/best_caries_model.pt"
 DEFAULT_CARIES_INPUT_MODE = "tooth_roi"
 CARIES_STANDARD_SIZE = (1536, 768)
-DEFAULT_CARIES_IMAGE_SIZE = 896
+DEFAULT_CARIES_IMAGE_SIZE = 640
+DEFAULT_CARIES_SLICED_INFERENCE = True
+DEFAULT_CARIES_SLICED_CONFIDENCE = 0.40
+DEFAULT_CARIES_SLICE_SIZE = 640
+DEFAULT_CARIES_SLICE_OVERLAP = 0.20
+DEFAULT_CARIES_SLICE_NMS = 0.50
+DEFAULT_CARIES_SLICE_NMS_METRIC = "ios"
 DEFAULT_CARIES_MAX_BOX_AREA = 0.02
 DEFAULT_CARIES_MAX_BOX_WIDTH = 0.16
 DEFAULT_CARIES_MAX_BOX_HEIGHT = 0.25
@@ -346,11 +353,63 @@ def caries_box_tooth_overlap(
     return float(mask_crop.mean()) if mask_crop.size else 0.0
 
 
+def detect_caries_sliced(
+    image: Image.Image,
+    confidence: float,
+    tooth_mask: Image.Image | None = None,
+) -> list[dict[str, Any]]:
+    """Tiled (SAHI-style) inference: the deployed operating point for the sliced-FT
+    checkpoint. Slices the full image, fuses boxes across tiles, then applies the
+    same box-plausibility and tooth-overlap gates as the full-image path."""
+    model = load_caries_model()
+    source = image.convert("RGB")
+    slice_size = int(os.environ.get("CARIES_SLICE_SIZE", str(DEFAULT_CARIES_SLICE_SIZE)))
+    overlap = env_float("CARIES_SLICE_OVERLAP", DEFAULT_CARIES_SLICE_OVERLAP)
+    nms_threshold = env_float("CARIES_SLICE_NMS", DEFAULT_CARIES_SLICE_NMS)
+    nms_metric = os.environ.get("CARIES_SLICE_NMS_METRIC", DEFAULT_CARIES_SLICE_NMS_METRIC)
+
+    boxes = sliced_detect(
+        model,
+        source,
+        confidence,
+        slice_size=slice_size,
+        overlap=overlap,
+        nms_threshold=nms_threshold,
+        nms_metric=nms_metric,
+    )
+
+    names = getattr(model, "names", {}) or {}
+    require_overlap = env_bool("CARIES_REQUIRE_TOOTH_OVERLAP", True)
+    min_tooth_overlap = env_float("CARIES_MIN_TOOTH_OVERLAP", DEFAULT_CARIES_MIN_TOOTH_OVERLAP)
+
+    detections: list[dict[str, Any]] = []
+    for x1, y1, x2, y2, box_confidence in boxes:
+        xyxy = (x1, y1, x2, y2)
+        if not caries_box_is_reasonable(xyxy, source.size):
+            continue
+        tooth_overlap = caries_box_tooth_overlap(xyxy, tooth_mask)
+        if tooth_mask is not None and require_overlap and tooth_overlap < min_tooth_overlap:
+            continue
+        detections.append(
+            {
+                "box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                "confidence": box_confidence,
+                "class_id": 0,
+                "class_name": names.get(0, "caries"),
+                "input_mode": "sliced_full",
+                "tooth_overlap": tooth_overlap,
+            }
+        )
+    return detections
+
+
 def detect_caries(
     image: Image.Image,
     confidence: float,
     tooth_mask: Image.Image | None = None,
 ) -> list[dict[str, Any]]:
+    if env_bool("CARIES_SLICED_INFERENCE", DEFAULT_CARIES_SLICED_INFERENCE):
+        return detect_caries_sliced(image, confidence, tooth_mask)
     model = load_caries_model()
     detector_image, crop_info, input_mode = prepare_caries_input_with_mask(image, tooth_mask)
     detector_array = np.asarray(detector_image)
@@ -561,6 +620,14 @@ def save_feedback_record(
         "caries_detection": {
             "confidence_threshold": caries_confidence,
             "input_mode": os.environ.get("CARIES_INPUT_MODE", DEFAULT_CARIES_INPUT_MODE),
+            "sliced_inference": env_bool(
+                "CARIES_SLICED_INFERENCE",
+                DEFAULT_CARIES_SLICED_INFERENCE,
+            ),
+            "slice_size": int(
+                os.environ.get("CARIES_SLICE_SIZE", str(DEFAULT_CARIES_SLICE_SIZE))
+            ),
+            "slice_overlap": env_float("CARIES_SLICE_OVERLAP", DEFAULT_CARIES_SLICE_OVERLAP),
             "min_tooth_overlap": env_float(
                 "CARIES_MIN_TOOTH_OVERLAP",
                 DEFAULT_CARIES_MIN_TOOTH_OVERLAP,
@@ -610,13 +677,19 @@ with st.sidebar:
     st.metric("Recall", "91.93%")
     st.caption("Educational demo only. Not for clinical diagnosis.")
     st.subheader("Caries detector")
+    _sliced_on = env_bool("CARIES_SLICED_INFERENCE", DEFAULT_CARIES_SLICED_INFERENCE)
+    _default_caries_conf = (
+        DEFAULT_CARIES_SLICED_CONFIDENCE if _sliced_on else DEFAULT_CARIES_CONFIDENCE
+    )
     caries_confidence = st.slider(
         "Caries confidence",
         min_value=0.01,
         max_value=0.90,
-        value=DEFAULT_CARIES_CONFIDENCE,
+        value=_default_caries_conf,
         step=0.01,
     )
+    if _sliced_on:
+        st.caption("Sliced (SAHI) inference: full image is tiled for tiny-lesion recall.")
 
 threshold = st.sidebar.slider(
     "Mask threshold",

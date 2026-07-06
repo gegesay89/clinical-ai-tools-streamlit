@@ -24,17 +24,20 @@ Final combined held-out test result:
 
 This is an educational demo only and is not for clinical diagnosis.
 
-Current caries-arrow defaults:
+Current caries-arrow defaults (sliced fine-tuned checkpoint, SAHI tiled inference):
 
 - `CARIES_MODEL_REPO=gegesay89/dental-caries-yolo-detector`
-- `CARIES_MODEL_FILENAME=caries_detector_kaggle/lesion_yolov8s_p2_896/best_caries_model.pt`
+- `CARIES_MODEL_FILENAME=caries_detector_kaggle/sliced_yolov8s_640/best_caries_model.pt`
+- `CARIES_SLICED_INFERENCE=true`
+- `CARIES_SLICE_SIZE=640`, `CARIES_SLICE_OVERLAP=0.2`
+- `CARIES_IMAGE_SIZE=640`
 - `CARIES_INPUT_MODE=tooth_roi`
-- `CARIES_IMAGE_SIZE=896`
 - `CARIES_REQUIRE_TOOTH_OVERLAP=true`
 
-The caries layer is a prototype extension. The latest lesion checkpoint has
-Kaggle validation precision 46.5%, recall 35.8%, mAP50 36.8%, and mAP50-95
-12.9%. The app runs it as a two-stage demo: U-Net first finds the tooth region,
-then YOLO runs on that crop and maps detections back to the original image. It
-is included for caries-arrow demonstration and feedback collection, not as
-diagnostic performance.
+The caries layer runs tiled (SAHI-style) inference: the full radiograph is
+sliced into overlapping 640px windows, the detector runs on each tile, and boxes
+are fused across tiles with greedy NMS. The U-Net first finds the tooth region
+and gates detections to it. The artifact-backed Kaggle metrics are still
+prototype-level; the tiled mode is used because full-image inference alone loses
+many tiny lesions after panoramic downscaling. This is an educational
+caries-arrow demo and feedback-collection layer, not diagnostic performance.
