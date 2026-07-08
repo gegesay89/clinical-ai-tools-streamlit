@@ -731,24 +731,6 @@ def render_docx_translator() -> None:
     if not translator_is_unlocked():
         return
 
-    with st.expander("Bedrock settings", expanded=False):
-        bedrock_model_id = st.text_input(
-            "Bedrock model/profile ID",
-            value=os.environ.get("BEDROCK_OPENAI_MODEL_ID", "global.anthropic.claude-opus-4-7"),
-        )
-        aws_region = st.text_input(
-            "AWS region",
-            value=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-2",
-        )
-        source_language = st.text_input("Source language", value="English")
-        target_language = st.text_input("Target language", value="French")
-        format_mode = st.radio(
-            "Formatting mode",
-            options=["Best formatting", "Best translation"],
-            horizontal=True,
-        )
-        batch_size = st.slider("Batch size", min_value=1, max_value=30, value=10)
-
     uploaded_docx = st.file_uploader("Word document", type=["docx"], key="docx_translator_upload")
     translate_clicked = st.button(
         "Translate DOCX",
@@ -769,19 +751,19 @@ def render_docx_translator() -> None:
     try:
         translator = BedrockOpenAITranslator(
             profile_name=os.environ.get("AWS_PROFILE") or None,
-            region_name=aws_region.strip() or "us-east-2",
-            model_id=bedrock_model_id.strip() or "global.anthropic.claude-opus-4-7",
+            region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-2",
+            model_id=os.environ.get("BEDROCK_OPENAI_MODEL_ID", "global.anthropic.claude-opus-4-7"),
             max_tokens=4096,
         )
         translated_bytes, summary = translate_docx_bytes(
             uploaded_docx.getvalue(),
             translator,
-            source_language=source_language.strip() or "English",
-            target_language=target_language.strip() or "French",
-            mode="runs" if format_mode == "Best formatting" else "paragraph",
+            source_language="English",
+            target_language="French",
+            mode="runs",
             include_headers_footers=True,
             include_notes_comments=True,
-            batch_size=batch_size,
+            batch_size=10,
             progress_callback=update_progress,
         )
     except (TranslationProviderError, ValueError) as exc:
