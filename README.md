@@ -6,12 +6,13 @@ pinned: false
 
 # Medical DOCX Translator + Dental Segmentation
 
-The home page includes a password-protected DOCX translator for converting Word
-documents into French using Amazon Bedrock. The current configured Bedrock
-profile is `global.anthropic.claude-opus-4-7`.
+The home page routes users to either the password-protected DOCX translator or
+the dental segmentation demo. The DOCX translator converts Word documents into
+French using Amazon Bedrock. The current configured Bedrock profile is
+`global.anthropic.claude-opus-4-7`.
 
 The original dental tooth segmentation and caries-arrow demo remains available
-below the translator on the same page.
+from the home page.
 
 ## Dental Tooth Segmentation U-Net
 

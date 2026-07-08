@@ -806,14 +806,55 @@ def render_docx_translator() -> None:
     st.success(f"Translated {summary.translated_units} text blocks.")
 
 
+def current_page() -> str:
+    page = st.query_params.get("page", "home")
+    if isinstance(page, list):
+        page = page[0] if page else "home"
+    return page if page in {"home", "translator", "dental"} else "home"
+
+
+def go_to_page(page: str) -> None:
+    st.query_params["page"] = page
+    st.rerun()
+
+
+def render_home_page() -> None:
+    st.title("Clinical AI Tools")
+    st.caption("Choose the workflow you want to use.")
+
+    translator_col, dental_col = st.columns(2)
+    with translator_col:
+        st.subheader("Medical DOCX French Translator")
+        st.write("Translate Word documents into French while preserving document structure and formatting.")
+        if st.button("Open DOCX Translator", type="primary", use_container_width=True):
+            go_to_page("translator")
+
+    with dental_col:
+        st.subheader("Dental Segmentation and Caries Arrows")
+        st.write("Upload panoramic dental radiographs for tooth-mask segmentation and caries-arrow review.")
+        if st.button("Open Dental Tool", use_container_width=True):
+            go_to_page("dental")
+
+
 st.set_page_config(
     page_title="Medical DOCX Translator and Dental Segmentation",
     page_icon=None,
     layout="wide",
 )
 
-render_docx_translator()
-st.divider()
+page = current_page()
+if page == "home":
+    render_home_page()
+    st.stop()
+
+if page == "translator":
+    if st.button("Back to home"):
+        go_to_page("home")
+    render_docx_translator()
+    st.stop()
+
+if st.button("Back to home"):
+    go_to_page("home")
 
 st.title("Dental Tooth Segmentation and Caries Arrows")
 
