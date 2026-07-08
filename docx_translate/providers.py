@@ -186,12 +186,33 @@ class BedrockOpenAITranslator:
         try:
             session = boto3.Session(**session_kwargs)
             client = session.client("bedrock-runtime")
-            return self._call_converse(
-                client,
-                texts,
-                source_language=source_language,
-                target_language=target_language,
-            )
+            try:
+                return self._call_converse(
+                    client,
+                    texts,
+                    source_language=source_language,
+                    target_language=target_language,
+                )
+            except TranslationProviderError as exc:
+                if not _is_no_text_output_error(exc):
+                    raise
+                fallback_model_id = _bedrock_fallback_model_id(self.model_id)
+                if not fallback_model_id:
+                    raise
+                try:
+                    return self._call_converse(
+                        client,
+                        texts,
+                        source_language=source_language,
+                        target_language=target_language,
+                        model_id=fallback_model_id,
+                    )
+                except TranslationProviderError as fallback_exc:
+                    raise TranslationProviderError(
+                        "Bedrock returned no text output from "
+                        f"{self.model_id}; fallback model {fallback_model_id} "
+                        f"also failed: {fallback_exc}"
+                    ) from fallback_exc
         except (BotoCoreError, ClientError) as exc:
             raise TranslationProviderError(f"Bedrock request failed: {exc}") from exc
 
@@ -202,11 +223,13 @@ class BedrockOpenAITranslator:
         *,
         source_language: str,
         target_language: str,
+        model_id: str | None = None,
     ) -> str:
         user_payload = json.dumps({"texts": texts}, ensure_ascii=False)
+        selected_model_id = model_id or self.model_id
 
         response = client.converse(
-            modelId=self.model_id,
+            modelId=selected_model_id,
             system=[{"text": self._system_prompt(source_language, target_language)}],
             messages=[
                 {
@@ -216,17 +239,13 @@ class BedrockOpenAITranslator:
             ],
             inferenceConfig={"maxTokens": self.max_tokens},
         )
-        chunks: list[str] = []
-        for part in (
-            response.get("output", {})
-            .get("message", {})
-            .get("content", [])
-        ):
-            text = part.get("text")
-            if text:
-                chunks.append(text)
+        chunks = _extract_bedrock_converse_text(response)
         if not chunks:
-            raise TranslationProviderError("Bedrock returned no text output.")
+            stop_reason = response.get("stopReason") if isinstance(response, dict) else None
+            reason = f" stopReason={stop_reason!r}." if stop_reason else ""
+            raise TranslationProviderError(
+                f"Bedrock returned no text output from {selected_model_id}.{reason}"
+            )
         return "\n".join(chunks)
 
     def _system_prompt(self, source_language: str, target_language: str) -> str:
@@ -596,6 +615,56 @@ def _local_marian_is_available() -> bool:
 
 def _uses_bedrock_openai_responses(model_id: str) -> bool:
     return model_id.startswith("openai.") and not model_id.endswith(":0")
+
+
+def _bedrock_fallback_model_id(primary_model_id: str) -> str | None:
+    fallback_model_id = os.getenv("BEDROCK_FALLBACK_MODEL_ID", "openai.gpt-oss-120b-1:0").strip()
+    if not fallback_model_id or fallback_model_id == primary_model_id:
+        return None
+    return fallback_model_id
+
+
+def _is_no_text_output_error(exc: Exception) -> bool:
+    return "no text output" in str(exc).lower()
+
+
+def _extract_bedrock_converse_text(response: object) -> list[str]:
+    """Extract assistant text from Bedrock Converse response variants."""
+
+    if not isinstance(response, dict):
+        return []
+
+    output = response.get("output", {})
+    if not isinstance(output, dict):
+        return []
+
+    message = output.get("message", {})
+    if isinstance(message, dict):
+        chunks = _collect_bedrock_text_values(message.get("content", []))
+        if chunks:
+            return chunks
+
+    return _collect_bedrock_text_values(output)
+
+
+def _collect_bedrock_text_values(value: object) -> list[str]:
+    chunks: list[str] = []
+    if isinstance(value, list):
+        for item in value:
+            chunks.extend(_collect_bedrock_text_values(item))
+        return chunks
+
+    if not isinstance(value, dict):
+        return chunks
+
+    for key, item in value.items():
+        if key == "reasoningContent":
+            continue
+        if key == "text" and isinstance(item, str) and item.strip():
+            chunks.append(item)
+            continue
+        chunks.extend(_collect_bedrock_text_values(item))
+    return chunks
 
 
 @lru_cache(maxsize=4)
