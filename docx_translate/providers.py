@@ -690,19 +690,29 @@ def _parse_translation_json(raw: str, *, expected_count: int) -> list[str]:
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", raw, flags=re.S)
         if not match:
-            raise TranslationProviderError("OpenAI did not return JSON.")
+            if expected_count == 1 and raw:
+                return [_strip_markdown_fence(raw)]
+            raise TranslationProviderError("Translation provider did not return JSON.")
         data = json.loads(match.group(0))
 
     translations = data.get("translations")
     if not isinstance(translations, list) or not all(
         isinstance(item, str) for item in translations
     ):
-        raise TranslationProviderError("OpenAI returned JSON without translations[].")
+        if expected_count == 1 and isinstance(data.get("translation"), str):
+            return [data["translation"]]
+        raise TranslationProviderError("Translation provider returned JSON without translations[].")
     if len(translations) != expected_count:
         raise TranslationProviderError(
-            f"OpenAI returned {len(translations)} translations for {expected_count} texts."
+            f"Translation provider returned {len(translations)} translations for {expected_count} texts."
         )
     return translations
+
+
+def _strip_markdown_fence(text: str) -> str:
+    stripped = text.strip()
+    fence_match = re.fullmatch(r"```(?:[A-Za-z0-9_-]+)?\s*(.*?)\s*```", stripped, flags=re.S)
+    return fence_match.group(1).strip() if fence_match else stripped
 
 
 def _extract_response_text(response: object) -> str:

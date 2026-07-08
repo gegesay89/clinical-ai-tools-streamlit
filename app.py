@@ -763,7 +763,7 @@ def render_docx_translator() -> None:
             mode="runs",
             include_headers_footers=True,
             include_notes_comments=True,
-            batch_size=10,
+            batch_size=1,
             progress_callback=update_progress,
         )
     except (TranslationProviderError, ValueError) as exc:
