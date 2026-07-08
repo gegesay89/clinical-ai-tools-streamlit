@@ -1,10 +1,19 @@
 ---
-title: Dental Tooth Segmentation U-Net
+title: Medical DOCX Translator + Dental Segmentation
 sdk: docker
 pinned: false
 ---
 
-# Dental Tooth Segmentation U-Net
+# Medical DOCX Translator + Dental Segmentation
+
+The home page includes a password-protected DOCX translator for converting Word
+documents into French using Amazon Bedrock. The current configured Bedrock
+profile is `global.anthropic.claude-opus-4-7`.
+
+The original dental tooth segmentation and caries-arrow demo remains available
+below the translator on the same page.
+
+## Dental Tooth Segmentation U-Net
 
 Streamlit demo for a U-Net dental tooth segmentation model trained for the
 course assignment.

@@ -14,6 +14,11 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 import numpy as np
 import streamlit as st
 from caries_sliced import sliced_detect
+from docx_translate import (
+    BedrockOpenAITranslator,
+    TranslationProviderError,
+    translate_docx_bytes,
+)
 from huggingface_hub import hf_hub_download
 from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
@@ -695,11 +700,120 @@ def segment_image(image: Image.Image, threshold: float) -> tuple[Image.Image, Im
     return mask, overlay, foreground_fraction
 
 
+def docx_output_name(filename: str) -> str:
+    stem = Path(filename).stem or "translated"
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    return f"{cleaned or 'translated'}_fr.docx"
+
+
+def translator_is_unlocked() -> bool:
+    password = os.environ.get("TRANSLATOR_PASSWORD") or os.environ.get("APP_PASSWORD")
+    if not password:
+        st.warning("The Word translator is not configured yet.")
+        return False
+    if st.session_state.get("translator_unlocked"):
+        return True
+
+    entered = st.text_input("Translator password", type="password")
+    if entered == password:
+        st.session_state["translator_unlocked"] = True
+        st.success("Translator unlocked.")
+        return True
+    if entered:
+        st.error("Incorrect password.")
+    return False
+
+
+def render_docx_translator() -> None:
+    st.title("Medical DOCX French Translator")
+    st.caption("Upload a Word document and download a French version with the original Word structure preserved.")
+
+    if not translator_is_unlocked():
+        return
+
+    with st.expander("Bedrock settings", expanded=False):
+        bedrock_model_id = st.text_input(
+            "Bedrock model/profile ID",
+            value=os.environ.get("BEDROCK_OPENAI_MODEL_ID", "global.anthropic.claude-opus-4-7"),
+        )
+        aws_region = st.text_input(
+            "AWS region",
+            value=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-2",
+        )
+        source_language = st.text_input("Source language", value="English")
+        target_language = st.text_input("Target language", value="French")
+        format_mode = st.radio(
+            "Formatting mode",
+            options=["Best formatting", "Best translation"],
+            horizontal=True,
+        )
+        batch_size = st.slider("Batch size", min_value=1, max_value=30, value=10)
+
+    uploaded_docx = st.file_uploader("Word document", type=["docx"], key="docx_translator_upload")
+    translate_clicked = st.button(
+        "Translate DOCX",
+        type="primary",
+        disabled=uploaded_docx is None,
+    )
+
+    if not translate_clicked or uploaded_docx is None:
+        return
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    def update_progress(done: int, total: int, message: str) -> None:
+        progress.progress(done / total if total else 1.0)
+        status.write(message)
+
+    try:
+        translator = BedrockOpenAITranslator(
+            profile_name=os.environ.get("AWS_PROFILE") or None,
+            region_name=aws_region.strip() or "us-east-2",
+            model_id=bedrock_model_id.strip() or "global.anthropic.claude-opus-4-7",
+            max_tokens=4096,
+        )
+        translated_bytes, summary = translate_docx_bytes(
+            uploaded_docx.getvalue(),
+            translator,
+            source_language=source_language.strip() or "English",
+            target_language=target_language.strip() or "French",
+            mode="runs" if format_mode == "Best formatting" else "paragraph",
+            include_headers_footers=True,
+            include_notes_comments=True,
+            batch_size=batch_size,
+            progress_callback=update_progress,
+        )
+    except (TranslationProviderError, ValueError) as exc:
+        progress.empty()
+        status.empty()
+        st.error(f"Translation failed: {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        progress.empty()
+        status.empty()
+        st.error(f"Translation failed: {exc}")
+        return
+
+    progress.progress(1.0)
+    status.write("Translation complete")
+    st.download_button(
+        "Download French DOCX",
+        data=translated_bytes,
+        file_name=docx_output_name(uploaded_docx.name),
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    st.success(f"Translated {summary.translated_units} text blocks.")
+
+
 st.set_page_config(
-    page_title="Dental Segmentation and Caries Arrows",
+    page_title="Medical DOCX Translator and Dental Segmentation",
     page_icon=None,
     layout="wide",
 )
+
+render_docx_translator()
+st.divider()
 
 st.title("Dental Tooth Segmentation and Caries Arrows")
 
