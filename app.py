@@ -912,14 +912,14 @@ with st.sidebar:
     st.metric("Recall", "91.93%")
     st.caption("Educational demo only. Not for clinical diagnosis.")
     st.subheader("Caries detector")
-    st.caption("Prototype YOLO validation metrics")
-    st.metric("Precision", "52.8%")
-    st.metric("Recall", "42.1%")
-    st.metric("mAP50", "37.7%")
-    st.metric("mAP50-95", "12.3%")
+    st.caption("DVCT-enriched YOLO tiled test metrics")
+    st.metric("F1 @IoU0.3", "68.0%")
+    st.metric("F1 @IoU0.5", "62.0%")
+    st.metric("Precision", "73.0%")
+    st.metric("Recall", "64.0%")
     st.caption(
-        "Caries metrics are artifact-backed Kaggle validation numbers for the "
-        "prototype checkpoint, not diagnostic performance."
+        "Original panoramic+zenodo target: F1 54.0% @IoU0.3, precision 66.0%, "
+        "recall 45.0%. Educational metric, not diagnostic performance."
     )
     _sliced_on = env_bool("CARIES_SLICED_INFERENCE", DEFAULT_CARIES_SLICED_INFERENCE)
     _default_caries_conf = (
