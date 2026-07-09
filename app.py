@@ -14,11 +14,6 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 import numpy as np
 import streamlit as st
 from caries_sliced import sliced_detect
-from docx_translate import (
-    BedrockOpenAITranslator,
-    TranslationProviderError,
-    translate_docx_bytes,
-)
 from huggingface_hub import hf_hub_download
 from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
@@ -30,7 +25,7 @@ MIN_COMPONENT_SIZE = 32
 DEFAULT_MODEL_REPO = "gegesay89/dental-tooth-segmentation-efficientnet-unet"
 MODEL_FILENAME = "best_model.keras"
 DEFAULT_CARIES_MODEL_REPO = "gegesay89/dental-caries-yolo-detector"
-CARIES_MODEL_FILENAME = "caries_detector_kaggle/sliced_yolov8s_640/best_caries_model.pt"
+CARIES_MODEL_FILENAME = "caries_detector_kaggle/sliced_dvct_yolov8s_640/best_caries_model.pt"
 DEFAULT_CARIES_INPUT_MODE = "tooth_roi"
 CARIES_STANDARD_SIZE = (1536, 768)
 DEFAULT_CARIES_IMAGE_SIZE = 640
@@ -47,6 +42,38 @@ DEFAULT_CARIES_MAX_BOX_HEIGHT = 0.25
 DEFAULT_TOOTH_ROI_PADDING_X = 0.08
 DEFAULT_TOOTH_ROI_PADDING_Y = 0.18
 DEFAULT_CARIES_MIN_TOOTH_OVERLAP = 0.05
+DEFAULT_FINDINGS_MODEL_REPO = "gegesay89/dental-findings-yolo-detector"
+FINDINGS_MODEL_FILENAME = "dental_disease_panoramic_yolov8seg/best.pt"
+DEFAULT_FINDINGS_ENABLED = True
+DEFAULT_FINDINGS_CONFIDENCE = 0.35
+DEFAULT_FINDINGS_IMAGE_SIZE = 960
+DEFAULT_FINDINGS_MAX_DETECTIONS = 40
+DEFAULT_FINDINGS_CLASSES = (
+    "Caries",
+    "Crown",
+    "Filling",
+    "Implant",
+    "Periapical lesion",
+    "Root Canal Treatment",
+    "Missing teeth",
+    "Bone Loss",
+    "Fracture teeth",
+    "Cyst",
+    "Root resorption",
+)
+FINDINGS_PALETTE = (
+    (230, 37, 37),
+    (8, 122, 93),
+    (37, 99, 235),
+    (245, 158, 11),
+    (124, 58, 237),
+    (14, 165, 233),
+    (220, 38, 38),
+    (22, 163, 74),
+    (217, 70, 239),
+    (234, 88, 12),
+    (79, 70, 229),
+)
 SAMPLE_IMAGE = Path(__file__).parent / "assets" / "final_prediction_comparison.png"
 FEEDBACK_ROOT = Path(os.environ.get("FEEDBACK_DIR", "feedback_submissions"))
 
@@ -135,6 +162,24 @@ def load_caries_model():
     else:
         model_repo = os.environ.get("CARIES_MODEL_REPO", DEFAULT_CARIES_MODEL_REPO)
         model_filename = os.environ.get("CARIES_MODEL_FILENAME", CARIES_MODEL_FILENAME)
+        model_path = hf_hub_download(repo_id=model_repo, filename=model_filename)
+
+    return YOLO(model_path)
+
+
+@st.cache_resource(show_spinner="Loading dental findings model")
+def load_findings_model():
+    from ultralytics import YOLO
+
+    local_model_path = os.environ.get("DENTAL_FINDINGS_MODEL_LOCAL_PATH")
+    if local_model_path:
+        model_path = local_model_path
+    else:
+        model_repo = os.environ.get("DENTAL_FINDINGS_MODEL_REPO", DEFAULT_FINDINGS_MODEL_REPO)
+        model_filename = os.environ.get(
+            "DENTAL_FINDINGS_MODEL_FILENAME",
+            FINDINGS_MODEL_FILENAME,
+        )
         model_path = hf_hub_download(repo_id=model_repo, filename=model_filename)
 
     return YOLO(model_path)
@@ -565,6 +610,134 @@ def draw_caries_arrows(
     return overlay
 
 
+def normalise_finding_name(name: str) -> str:
+    return " ".join(name.strip().lower().replace("_", " ").split())
+
+
+def allowed_finding_classes() -> set[str] | None:
+    value = os.environ.get("DENTAL_FINDINGS_CLASSES")
+    if value is None or not value.strip():
+        return {normalise_finding_name(name) for name in DEFAULT_FINDINGS_CLASSES}
+    if value.strip() == "*":
+        return None
+    parsed = {normalise_finding_name(item) for item in value.split(",") if item.strip()}
+    return parsed or {normalise_finding_name(name) for name in DEFAULT_FINDINGS_CLASSES}
+
+
+def model_class_name(names: Any, class_id: int) -> str:
+    if isinstance(names, dict):
+        return str(names.get(class_id, names.get(str(class_id), f"class {class_id}")))
+    if isinstance(names, (list, tuple)) and 0 <= class_id < len(names):
+        return str(names[class_id])
+    return f"class {class_id}"
+
+
+def mask_points_from_result(result: Any, index: int) -> list[tuple[float, float]]:
+    masks = getattr(result, "masks", None)
+    if masks is None or getattr(masks, "xy", None) is None or index >= len(masks.xy):
+        return []
+    points = masks.xy[index]
+    if points is None:
+        return []
+    return [(float(x), float(y)) for x, y in points.tolist()]
+
+
+def detect_dental_findings(image: Image.Image, confidence: float) -> list[dict[str, Any]]:
+    model = load_findings_model()
+    source = image.convert("RGB")
+    image_size = int(
+        os.environ.get("DENTAL_FINDINGS_IMAGE_SIZE", str(DEFAULT_FINDINGS_IMAGE_SIZE))
+    )
+    max_detections = int(
+        os.environ.get("DENTAL_FINDINGS_MAX_DETECTIONS", str(DEFAULT_FINDINGS_MAX_DETECTIONS))
+    )
+    results = model.predict(
+        source,
+        conf=confidence,
+        imgsz=image_size,
+        verbose=False,
+        max_det=max_detections,
+    )
+    if not results:
+        return []
+
+    result = results[0]
+    boxes = getattr(result, "boxes", None)
+    if boxes is None:
+        return []
+
+    names = getattr(model, "names", {}) or {}
+    allowed_classes = allowed_finding_classes()
+    findings: list[dict[str, Any]] = []
+    for index, box in enumerate(boxes):
+        class_id = int(box.cls[0])
+        class_name = model_class_name(names, class_id)
+        if (
+            allowed_classes is not None
+            and normalise_finding_name(class_name) not in allowed_classes
+        ):
+            continue
+        x1, y1, x2, y2 = (float(value) for value in box.xyxy[0].tolist())
+        findings.append(
+            {
+                "box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                "confidence": float(box.conf[0]),
+                "class_id": class_id,
+                "class_name": class_name,
+                "mask_points": mask_points_from_result(result, index),
+            }
+        )
+        if len(findings) >= max_detections:
+            break
+    return findings
+
+
+def draw_dental_findings_overlay(
+    image: Image.Image,
+    findings: list[dict[str, Any]],
+) -> Image.Image:
+    base = image.convert("RGBA")
+    mask_layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    mask_draw = ImageDraw.Draw(mask_layer)
+    for finding in findings:
+        points = finding.get("mask_points") or []
+        if len(points) >= 3:
+            color = FINDINGS_PALETTE[int(finding["class_id"]) % len(FINDINGS_PALETTE)]
+            mask_draw.polygon(points, fill=(*color, 72))
+
+    overlay = Image.alpha_composite(base, mask_layer).convert("RGB")
+    draw = ImageDraw.Draw(overlay)
+    font = ImageFont.load_default()
+    line_width = max(2, round(min(image.size) / 220))
+
+    if not findings:
+        label = "No Dental Findings Detected"
+        label_box = draw.textbbox((0, 0), label, font=font)
+        label_width = min(image.width - 16, label_box[2] - label_box[0] + 18)
+        label_height = label_box[3] - label_box[1] + 12
+        draw.rectangle((8, 8, 8 + label_width, 8 + label_height), fill=(40, 40, 40))
+        draw.text((17, 14), label, fill=(255, 255, 255), font=font)
+        return overlay
+
+    for finding in findings:
+        color = FINDINGS_PALETTE[int(finding["class_id"]) % len(FINDINGS_PALETTE)]
+        box = finding["box"]
+        x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
+        draw.rectangle((x1, y1, x2, y2), outline=color, width=line_width)
+        label = f"{finding['class_name']} {finding['confidence']:.2f}"
+        label_box = draw.textbbox((0, 0), label, font=font)
+        label_width = label_box[2] - label_box[0] + 8
+        label_height = label_box[3] - label_box[1] + 6
+        label_x = max(0, min(image.width - label_width, x1))
+        label_y = max(0, y1 - label_height - 4)
+        draw.rectangle(
+            (label_x, label_y, label_x + label_width, label_y + label_height),
+            fill=color,
+        )
+        draw.text((label_x + 4, label_y + 3), label, fill=(255, 255, 255), font=font)
+    return overlay
+
+
 def image_to_png_bytes(image: Image.Image) -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
@@ -604,6 +777,8 @@ def save_feedback_record(
     caries_detections: list[dict[str, Any]],
     low_confidence_caries_detections: list[dict[str, Any]],
     caries_status: str,
+    findings_overlay_image: Image.Image | None,
+    dental_findings: list[dict[str, Any]],
     uploaded_bytes: bytes,
     original_filename: str,
     review_label: str,
@@ -622,6 +797,7 @@ def save_feedback_record(
     mask_path = record_dir / "predicted_mask.png"
     overlay_path = record_dir / "overlay.png"
     caries_overlay_path = record_dir / "caries_overlay.png"
+    findings_overlay_path = record_dir / "dental_findings_overlay.png"
     metadata_path = record_dir / "metadata.json"
 
     source_image.save(source_path)
@@ -629,6 +805,8 @@ def save_feedback_record(
     overlay_image.save(overlay_path)
     if caries_overlay_image is not None:
         caries_overlay_image.save(caries_overlay_path)
+    if findings_overlay_image is not None:
+        findings_overlay_image.save(findings_overlay_path)
 
     metadata = {
         "submission_id": submission_id,
@@ -674,6 +852,22 @@ def save_feedback_record(
             "detections": caries_detections,
             "low_confidence_detections": low_confidence_caries_detections,
         },
+        "dental_findings": {
+            "model_repo": os.environ.get(
+                "DENTAL_FINDINGS_MODEL_REPO",
+                DEFAULT_FINDINGS_MODEL_REPO,
+            ),
+            "model_filename": os.environ.get(
+                "DENTAL_FINDINGS_MODEL_FILENAME",
+                FINDINGS_MODEL_FILENAME,
+            ),
+            "enabled": env_bool("DENTAL_FINDINGS_ENABLED", DEFAULT_FINDINGS_ENABLED),
+            "confidence_threshold": env_float(
+                "DENTAL_FINDINGS_CONFIDENCE",
+                DEFAULT_FINDINGS_CONFIDENCE,
+            ),
+            "detections": dental_findings,
+        },
         "source_size": {"width": source_image.width, "height": source_image.height},
         "foreground_fraction": foreground_fraction,
         "files": {
@@ -684,6 +878,8 @@ def save_feedback_record(
     }
     if caries_overlay_image is not None:
         metadata["files"]["caries_overlay"] = "caries_overlay.png"
+    if findings_overlay_image is not None:
+        metadata["files"]["dental_findings_overlay"] = "dental_findings_overlay.png"
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     dataset_url = upload_feedback_to_hub(record_dir, submission_id)
     return submission_id, dataset_url
@@ -700,143 +896,11 @@ def segment_image(image: Image.Image, threshold: float) -> tuple[Image.Image, Im
     return mask, overlay, foreground_fraction
 
 
-def docx_output_name(filename: str) -> str:
-    stem = Path(filename).stem or "translated"
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
-    return f"{cleaned or 'translated'}_fr.docx"
-
-
-def translator_is_unlocked() -> bool:
-    password = os.environ.get("TRANSLATOR_PASSWORD") or os.environ.get("APP_PASSWORD")
-    if not password:
-        st.warning("The Word translator is not configured yet.")
-        return False
-    if st.session_state.get("translator_unlocked"):
-        return True
-
-    entered = st.text_input("Translator password", type="password")
-    if entered == password:
-        st.session_state["translator_unlocked"] = True
-        st.success("Translator unlocked.")
-        return True
-    if entered:
-        st.error("Incorrect password.")
-    return False
-
-
-def render_docx_translator() -> None:
-    st.title("Medical DOCX French Translator")
-    st.caption("Upload a Word document and download a French version with the original Word structure preserved.")
-
-    if not translator_is_unlocked():
-        return
-
-    uploaded_docx = st.file_uploader("Word document", type=["docx"], key="docx_translator_upload")
-    translate_clicked = st.button(
-        "Translate DOCX",
-        type="primary",
-        disabled=uploaded_docx is None,
-    )
-
-    if not translate_clicked or uploaded_docx is None:
-        return
-
-    progress = st.progress(0)
-    status = st.empty()
-
-    def update_progress(done: int, total: int, message: str) -> None:
-        progress.progress(done / total if total else 1.0)
-        status.write(message)
-
-    try:
-        translator = BedrockOpenAITranslator(
-            profile_name=os.environ.get("AWS_PROFILE") or None,
-            region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-2",
-            model_id=os.environ.get("BEDROCK_OPENAI_MODEL_ID", "global.anthropic.claude-opus-4-7"),
-            max_tokens=4096,
-        )
-        translated_bytes, summary = translate_docx_bytes(
-            uploaded_docx.getvalue(),
-            translator,
-            source_language="English",
-            target_language="French",
-            mode="runs",
-            include_headers_footers=True,
-            include_notes_comments=True,
-            batch_size=1,
-            progress_callback=update_progress,
-        )
-    except (TranslationProviderError, ValueError) as exc:
-        progress.empty()
-        status.empty()
-        st.error(f"Translation failed: {exc}")
-        return
-    except Exception as exc:  # noqa: BLE001
-        progress.empty()
-        status.empty()
-        st.error(f"Translation failed: {exc}")
-        return
-
-    progress.progress(1.0)
-    status.write("Translation complete")
-    st.download_button(
-        "Download French DOCX",
-        data=translated_bytes,
-        file_name=docx_output_name(uploaded_docx.name),
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    )
-    st.success(f"Translated {summary.translated_units} text blocks.")
-
-
-def current_page() -> str:
-    page = st.query_params.get("page", "home")
-    if isinstance(page, list):
-        page = page[0] if page else "home"
-    return page if page in {"home", "translator", "dental"} else "home"
-
-
-def go_to_page(page: str) -> None:
-    st.query_params["page"] = page
-    st.rerun()
-
-
-def render_home_page() -> None:
-    st.title("Clinical AI Tools")
-    st.caption("Choose the workflow you want to use.")
-
-    translator_col, dental_col = st.columns(2)
-    with translator_col:
-        st.subheader("Medical DOCX French Translator")
-        st.write("Translate Word documents into French while preserving document structure and formatting.")
-        if st.button("Open DOCX Translator", type="primary", use_container_width=True):
-            go_to_page("translator")
-
-    with dental_col:
-        st.subheader("Dental Segmentation and Caries Arrows")
-        st.write("Upload panoramic dental radiographs for tooth-mask segmentation and caries-arrow review.")
-        if st.button("Open Dental Tool", use_container_width=True):
-            go_to_page("dental")
-
-
 st.set_page_config(
-    page_title="Medical DOCX Translator and Dental Segmentation",
+    page_title="Dental Segmentation and Caries Arrows",
     page_icon=None,
     layout="wide",
 )
-
-page = current_page()
-if page == "home":
-    render_home_page()
-    st.stop()
-
-if page == "translator":
-    if st.button("Back to home"):
-        go_to_page("home")
-    render_docx_translator()
-    st.stop()
-
-if st.button("Back to home"):
-    go_to_page("home")
 
 st.title("Dental Tooth Segmentation and Caries Arrows")
 
@@ -870,6 +934,19 @@ with st.sidebar:
     )
     if _sliced_on:
         st.caption("Sliced (SAHI) inference: full image is tiled for tiny-lesion recall.")
+    st.subheader("Dental findings")
+    findings_enabled = st.checkbox(
+        "Run multi-class findings",
+        value=env_bool("DENTAL_FINDINGS_ENABLED", DEFAULT_FINDINGS_ENABLED),
+    )
+    findings_confidence = st.slider(
+        "Findings confidence",
+        min_value=0.10,
+        max_value=0.90,
+        value=env_float("DENTAL_FINDINGS_CONFIDENCE", DEFAULT_FINDINGS_CONFIDENCE),
+        step=0.05,
+        disabled=not findings_enabled,
+    )
 
 threshold = st.sidebar.slider(
     "Mask threshold",
@@ -935,6 +1012,20 @@ else:
         caries_overlay_image = None
         caries_error = str(exc)
 
+    findings_error = None
+    dental_findings: list[dict[str, Any]] = []
+    findings_overlay_image: Image.Image | None = None
+    if findings_enabled:
+        try:
+            with st.spinner("Detecting dental findings"):
+                dental_findings = detect_dental_findings(source_image, findings_confidence)
+                findings_overlay_image = draw_dental_findings_overlay(
+                    source_image,
+                    dental_findings,
+                )
+        except Exception as exc:  # noqa: BLE001
+            findings_error = str(exc)
+
     st.caption(f"Predicted tooth-mask foreground: {foreground_fraction:.2%}")
     if caries_error:
         st.warning(f"Caries detector is unavailable: {caries_error}")
@@ -946,8 +1037,12 @@ else:
             )
         else:
             st.caption(f"Caries result: {caries_status} ({len(caries_detections)} candidates)")
+    if findings_error:
+        st.warning(f"Dental findings model is unavailable: {findings_error}")
+    elif findings_overlay_image is not None:
+        st.caption(f"Dental findings: {len(dental_findings)} candidates")
 
-    source_col, mask_col, overlay_col, caries_col = st.columns(4)
+    source_col, mask_col, overlay_col, caries_col, findings_col = st.columns(5)
     with source_col:
         st.image(source_image, caption="Source", use_container_width=True)
     with mask_col:
@@ -981,6 +1076,21 @@ else:
             )
         else:
             st.image(source_image, caption="Caries arrows unavailable", use_container_width=True)
+    with findings_col:
+        if findings_overlay_image is not None:
+            st.image(
+                findings_overlay_image,
+                caption="Dental findings",
+                use_container_width=True,
+            )
+            st.download_button(
+                "Download findings",
+                data=image_to_png_bytes(findings_overlay_image),
+                file_name="dental_findings.png",
+                mime="image/png",
+            )
+        else:
+            st.image(source_image, caption="Findings unavailable", use_container_width=True)
 
     st.divider()
     st.subheader("Feedback for Retraining")
@@ -1013,6 +1123,8 @@ else:
                 caries_detections=caries_detections,
                 low_confidence_caries_detections=low_confidence_caries_detections,
                 caries_status=caries_status,
+                findings_overlay_image=findings_overlay_image,
+                dental_findings=dental_findings,
                 uploaded_bytes=uploaded_bytes,
                 original_filename=uploaded_file.name,
                 review_label=review_label,
