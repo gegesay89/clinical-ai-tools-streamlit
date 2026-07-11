@@ -6,3 +6,10 @@ pillow==10.4.0
 scipy==1.13.1
 opencv-python-headless>=4.10
 ultralytics>=8.3
+torchvision>=0.17
+python-docx>=1.1.2
+lxml>=5.2
+boto3>=1.43
+botocore>=1.43
+requests>=2.32
+openai>=2.0
