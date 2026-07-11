@@ -10,8 +10,8 @@ The home page provides three independent workflows:
 
 1. Medical DOCX English-to-French translation with Word structure preservation.
 2. Dental tooth segmentation, caries candidates, and dental findings.
-3. Orthopedic fracture localization, anatomy-region boxes, fracture status, broad
-   anatomy context, and radiographic view classification.
+3. Orthopedic fracture localization, secondary fracture status, anatomical
+   context, radiographic view classification, and audit-only anatomy regions.
 
 ## Orthopedic Fracture Detection
 
@@ -49,9 +49,17 @@ contradicts localized fracture evidence, its exact label and confidence are
 suppressed from the normal interface; a generic warning is shown and the raw
 prediction remains in downloaded JSON. A no-box result may still appear as a
 clearly labeled fallback because absence of a box is not a calibrated negative
-diagnosis. Anatomy-region YOLO boxes are kept separate from whole-image anatomy
-context; context labels below the 0.50 display floor remain in downloaded JSON
-but are suppressed from the normal result view.
+diagnosis. Anatomy-region YOLO boxes remain in downloaded JSON and a technical
+audit artifact, but are not drawn on the physician-facing X-ray because most
+training targets are weak broad foreground regions rather than expert bone
+boundaries. Context labels below the 0.50 display floor remain in downloaded
+JSON; among accepted labels, the interface shows only the strongest anatomy
+result. The radiographic view is displayed separately.
+
+The sidebar keeps friendly model names and thresholds inside a collapsed
+**Models and settings** section; no checkpoint source or local path is shown in
+the clinical interface. Results show only the original X-ray and fracture
+localization image, with enlargement controls for annotation review.
 
 The fracture tools are educational decision support and are not clinically
 validated diagnostic systems.

@@ -6,6 +6,7 @@ from PIL import Image
 from fracture_runtime import (
     Classification,
     Detection,
+    _combined_overlay,
     _display_anatomy_labels,
     _fracture_status_display_policy,
     _model_disagreement,
@@ -42,6 +43,21 @@ def test_overlay_draws_labelled_detection() -> None:
     assert display_label("hand_wrist_forearm") == "Hand Wrist Forearm"
 
 
+def test_clinician_overlay_draws_fractures_without_anatomy_boxes() -> None:
+    image = Image.new("RGB", (100, 100), (12, 12, 12))
+    fracture = Detection(0, "fracture", 0.9, (40, 40, 70, 70))
+
+    output = _combined_overlay(
+        image,
+        (fracture,),
+        "Fracture Detected",
+        0.40,
+    )
+
+    assert output.getpixel((40, 50)) == (220, 38, 38)
+    assert output.getpixel((20, 50)) == (12, 12, 12)
+
+
 def test_fracture_detections_are_split_at_primary_display_threshold() -> None:
     low_box = Detection(0, "fracture", 0.32, (10, 20, 30, 40))
     primary_box = Detection(0, "fracture", 0.66, (20, 30, 40, 50))
@@ -67,6 +83,26 @@ def test_anatomy_display_floor_suppresses_weak_context_label() -> None:
         thresholds={
             "hand_wrist_forearm": 0.52,
             "shoulder_humerus": 0.38,
+        },
+    )
+
+    assert _display_anatomy_labels(classification, 0.50) == (
+        "hand_wrist_forearm",
+    )
+
+
+def test_anatomy_display_returns_only_the_strongest_accepted_label() -> None:
+    classification = Classification(
+        primary_label="hand_wrist_forearm",
+        confidence=0.85,
+        accepted_labels=("shoulder_humerus", "hand_wrist_forearm"),
+        probabilities={
+            "hand_wrist_forearm": 0.85,
+            "shoulder_humerus": 0.77,
+        },
+        thresholds={
+            "hand_wrist_forearm": 0.52,
+            "shoulder_humerus": 0.52,
         },
     )
 

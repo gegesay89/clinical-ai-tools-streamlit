@@ -472,11 +472,14 @@ def _display_anatomy_labels(
 ) -> tuple[str, ...]:
     if classification is None:
         return ()
-    return tuple(
+    qualifying = tuple(
         label
         for label in classification.accepted_labels
         if classification.probabilities[label] >= display_confidence
     )
+    if not qualifying:
+        return ()
+    return (max(qualifying, key=classification.probabilities.__getitem__),)
 
 
 def _fracture_status_display_policy(
@@ -507,20 +510,11 @@ def _model_disagreement(
 def _combined_overlay(
     image: Image.Image,
     fractures: tuple[Detection, ...],
-    anatomy: tuple[Detection, ...],
     status: str,
     primary_confidence: float,
 ) -> Image.Image:
     output = image.copy()
     draw = ImageDraw.Draw(output)
-    for detection in anatomy:
-        _label_box(
-            draw,
-            output.size,
-            detection,
-            ANATOMY_PALETTE[detection.class_id % len(ANATOMY_PALETTE)],
-            f"Anatomy region: {display_label(detection.class_name)}",
-        )
     for detection in fractures:
         is_primary = detection.confidence >= primary_confidence
         _label_box(
@@ -649,7 +643,6 @@ def analyze_fracture_image(
         combined_overlay=_combined_overlay(
             source,
             fractures,
-            anatomy,
             status,
             primary_fracture_confidence,
         ),

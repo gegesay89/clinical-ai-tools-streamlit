@@ -1030,7 +1030,7 @@ def render_home_page() -> None:
             go_to_page("dental")
     with fracture_col:
         st.subheader("Orthopedic Fracture Detection")
-        st.write("Fracture boxes, anatomy regions, and radiographic view context.")
+        st.write("Fracture localization with anatomical and radiographic view context.")
         if st.button("Open Fracture Tool", use_container_width=True):
             go_to_page("fracture")
 
@@ -1040,30 +1040,40 @@ def render_fracture_tool() -> None:
     st.warning(MEDICAL_DISCLAIMER)
 
     with st.sidebar:
-        st.subheader("Fracture YOLO")
-        st.metric("Precision", "87.1%")
-        st.metric("Recall", "89.1%")
-        st.metric("F1", "88.1%")
-        fracture_confidence = st.slider(
-            "Candidate box threshold",
-            min_value=0.05,
-            max_value=0.90,
-            value=0.25,
-            step=0.05,
-            key="fracture_confidence",
-            help=(
-                "The reported fixed-point evaluation uses 0.25. Boxes below the "
-                "0.40 primary display threshold are shown as low confidence."
-            ),
-        )
-        anatomy_confidence = st.slider(
-            "Anatomy-box confidence",
-            min_value=0.05,
-            max_value=0.90,
-            value=0.25,
-            step=0.05,
-            key="fracture_anatomy_confidence",
-        )
+        with st.expander("Models and settings", expanded=False):
+            st.markdown(
+                "**Fracture localization** · YOLOv8s  \n"
+                "**Anatomy-region analysis** · YOLOv8s  \n"
+                "**Fracture status support** · ResNet-18  \n"
+                "**Anatomical region** · ResNet-18  \n"
+                "**Radiographic view** · ResNet-18"
+            )
+            st.caption("Validated fracture detector")
+            metric_precision, metric_recall, metric_f1 = st.columns(3)
+            metric_precision.metric("Precision", "87.1%")
+            metric_recall.metric("Recall", "89.1%")
+            metric_f1.metric("F1", "88.1%")
+            fracture_confidence = st.slider(
+                "Candidate box threshold",
+                min_value=0.05,
+                max_value=0.90,
+                value=0.25,
+                step=0.05,
+                key="fracture_confidence",
+                help=(
+                    "The reported fixed-point evaluation uses 0.25. Boxes below the "
+                    "0.40 primary display threshold are shown as review candidates."
+                ),
+            )
+            anatomy_confidence = st.slider(
+                "Anatomy analysis threshold",
+                min_value=0.05,
+                max_value=0.90,
+                value=0.25,
+                step=0.05,
+                key="fracture_anatomy_confidence",
+                help="Used for the technical audit output; anatomy boxes are not shown clinically.",
+            )
 
     uploaded_file = st.file_uploader(
         "Orthopedic X-ray",
@@ -1074,40 +1084,55 @@ def render_fracture_tool() -> None:
         st.session_state["fracture_use_demo"] = True
     if uploaded_file is not None:
         st.session_state["fracture_use_demo"] = False
-        image_bytes = io.BytesIO(uploaded_file.getvalue())
+        source_bytes = uploaded_file.getvalue()
         source_name = uploaded_file.name
     elif st.session_state.get("fracture_use_demo") and FRACTURE_SAMPLE_IMAGE.exists():
-        image_bytes = FRACTURE_SAMPLE_IMAGE
+        source_bytes = FRACTURE_SAMPLE_IMAGE.read_bytes()
         source_name = "GRAZPEDWRI-DX held-out demo"
     else:
         return
 
     try:
-        source = Image.open(image_bytes)
+        source = Image.open(io.BytesIO(source_bytes))
         source.load()
     except Exception as error:  # noqa: BLE001
         st.error(f"Could not read this image: {error}")
         return
 
-    if not st.button("Run fracture analysis", type="primary"):
+    primary_fracture_confidence = float(
+        os.environ.get("FRACTURE_PRIMARY_CONFIDENCE", "0.40")
+    )
+    anatomy_context_display_confidence = float(
+        os.environ.get("FRACTURE_CONTEXT_DISPLAY_CONFIDENCE", "0.50")
+    )
+    analysis_key = (
+        hashlib.sha256(source_bytes).hexdigest(),
+        fracture_confidence,
+        anatomy_confidence,
+        primary_fracture_confidence,
+        anatomy_context_display_confidence,
+    )
+
+    if st.button("Analyze X-ray", type="primary"):
+        with st.spinner("Analyzing X-ray"):
+            result = analyze_fracture_image(
+                source,
+                fracture_confidence=fracture_confidence,
+                anatomy_confidence=anatomy_confidence,
+                primary_fracture_confidence=primary_fracture_confidence,
+                anatomy_context_display_confidence=anatomy_context_display_confidence,
+                device=os.environ.get("FRACTURE_DEVICE", "cpu"),
+            )
+        st.session_state["fracture_analysis_result"] = result
+        st.session_state["fracture_analysis_key"] = analysis_key
+    elif st.session_state.get("fracture_analysis_key") == analysis_key:
+        result = st.session_state.get("fracture_analysis_result")
+    else:
+        result = None
+
+    if result is None:
         st.image(source, caption=source_name, width=520)
         return
-
-    with st.spinner("Running fracture, anatomy, and context models"):
-        primary_fracture_confidence = float(
-            os.environ.get("FRACTURE_PRIMARY_CONFIDENCE", "0.40")
-        )
-        anatomy_context_display_confidence = float(
-            os.environ.get("FRACTURE_CONTEXT_DISPLAY_CONFIDENCE", "0.50")
-        )
-        result = analyze_fracture_image(
-            source,
-            fracture_confidence=fracture_confidence,
-            anatomy_confidence=anatomy_confidence,
-            primary_fracture_confidence=primary_fracture_confidence,
-            anatomy_context_display_confidence=anatomy_context_display_confidence,
-            device=os.environ.get("FRACTURE_DEVICE", "cpu"),
-        )
 
     if result.status == "Fracture Detected":
         st.error(result.status)
@@ -1127,11 +1152,7 @@ def render_fracture_tool() -> None:
         (detection.confidence for detection in result.fracture_detections),
         default=None,
     )
-    anatomy_max = max(
-        (detection.confidence for detection in result.anatomy_detections),
-        default=None,
-    )
-    primary_col, low_confidence_col, box_col, anatomy_box_col = st.columns(4)
+    primary_col, low_confidence_col, box_col = st.columns(3)
     primary_col.metric(
         "Primary fracture boxes",
         len(result.primary_fracture_detections),
@@ -1143,10 +1164,6 @@ def render_fracture_tool() -> None:
     box_col.metric(
         "Top localized fracture",
         f"{fracture_max:.1%}" if fracture_max is not None else "No box",
-    )
-    anatomy_box_col.metric(
-        "Top anatomy-region box",
-        f"{anatomy_max:.1%}" if anatomy_max is not None else "No box",
     )
 
     st.caption(
@@ -1163,39 +1180,29 @@ def render_fracture_tool() -> None:
             display_label(result.fracture_status.primary_label),
         )
         status_col.caption(f"Confidence: {result.fracture_status.confidence:.1%}")
-        fallback_note_col.info(
-            "This whole-image fallback cannot override a localized fracture box."
+        fallback_note_col.markdown("**Interpretation role**")
+        fallback_note_col.caption(
+            "Supporting whole-image result. It cannot override localized fracture evidence."
         )
 
-    st.subheader("Anatomy interpretation")
-    anatomy_box_col, anatomy_col, view_col = st.columns(3)
-    if result.anatomy_detections:
-        top_anatomy = max(
-            result.anatomy_detections,
-            key=lambda detection: detection.confidence,
-        )
-        anatomy_box_col.metric(
-            "Anatomy-region YOLO",
-            display_label(top_anatomy.class_name),
-        )
-        anatomy_box_col.caption(f"Box confidence: {top_anatomy.confidence:.1%}")
-    else:
-        anatomy_box_col.metric("Anatomy-region YOLO", "No box")
+    st.subheader("Exam context")
+    anatomy_col, view_col = st.columns(2)
     if result.anatomy_context is None:
-        anatomy_col.metric("Whole-image anatomy context", "Unavailable")
+        anatomy_col.metric("Anatomical region", "Unavailable")
     elif result.anatomy_context_display_labels:
+        displayed_anatomy = max(
+            result.anatomy_context_display_labels,
+            key=lambda label: result.anatomy_context.probabilities[label],
+        )
         anatomy_col.metric(
-            "Whole-image anatomy context",
-            display_label(result.anatomy_context_display_labels[0]),
+            "Anatomical region",
+            display_label(displayed_anatomy),
         )
         anatomy_col.caption(
-            ", ".join(
-                f"{display_label(label)} {result.anatomy_context.probabilities[label]:.1%}"
-                for label in result.anatomy_context_display_labels
-            )
+            f"Confidence: {result.anatomy_context.probabilities[displayed_anatomy]:.1%}"
         )
     else:
-        anatomy_col.metric("Whole-image anatomy context", "No displayed label")
+        anatomy_col.metric("Anatomical region", "Uncertain")
         anatomy_col.caption(
             "No accepted anatomy label reached the "
             f"{result.anatomy_context_display_confidence:.0%} display floor."
@@ -1203,39 +1210,37 @@ def render_fracture_tool() -> None:
     if result.view_context is None:
         view_col.metric("Radiographic view", "Unavailable")
     else:
-        view_col.metric("View confidence", f"{result.view_context.confidence:.1%}")
-        view_col.caption(display_label(result.view_context.primary_label))
+        view_col.metric(
+            "Radiographic view",
+            display_label(result.view_context.primary_label),
+        )
+        view_col.caption(f"Confidence: {result.view_context.confidence:.1%}")
         if not result.view_context.accepted_labels:
             view_col.caption("Below validation threshold")
 
-    st.info(
-        "Anatomy-region YOLO boxes describe broad visible regions and can include "
-        "documented source-derived weak labels. They are not precise bone segmentation "
-        "or expert-drawn bone boundaries."
-    )
-
     source_col, combined_col = st.columns(2)
-    source_col.image(result.source, caption="Original X-ray", use_container_width=True)
-    combined_col.image(
-        result.combined_overlay,
-        caption="Combined fracture and anatomy overlay",
-        use_container_width=True,
-    )
-    with st.expander("Separate model overlays"):
-        fracture_col, anatomy_box_col = st.columns(2)
-        fracture_col.image(
-            result.fracture_overlay,
-            caption="Fracture detector: red primary, amber low confidence",
+    with source_col:
+        st.image(result.source, caption="Original X-ray", use_container_width=True)
+        if st.button(
+            "Enlarge original",
+            icon=":material/zoom_in:",
+            key="zoom_fracture_source",
+            use_container_width=True,
+        ):
+            show_xray_viewer(result.source, "Original X-ray")
+    with combined_col:
+        st.image(
+            result.combined_overlay,
+            caption="Fracture localization: red primary, amber review candidate",
             use_container_width=True,
         )
-        anatomy_box_col.image(
-            result.anatomy_overlay,
-            caption=(
-                "Anatomy-region detector: broad region box"
-                + (f" ({anatomy_max:.1%})" if anatomy_max is not None else "")
-            ),
+        if st.button(
+            "Enlarge annotations",
+            icon=":material/zoom_in:",
+            key="zoom_fracture_annotations",
             use_container_width=True,
-        )
+        ):
+            show_xray_viewer(result.combined_overlay, "Fracture localization")
 
     payload = {
         "status": result.status,
@@ -1279,7 +1284,7 @@ def render_fracture_tool() -> None:
     }
     download_col, json_col = st.columns(2)
     download_col.download_button(
-        "Download combined overlay",
+        "Download fracture overlay",
         data=image_to_png_bytes(result.combined_overlay),
         file_name="fracture_analysis_overlay.png",
         mime="image/png",
@@ -1294,8 +1299,8 @@ def render_fracture_tool() -> None:
     )
     if result.errors:
         with st.expander("Model availability details"):
-            for component, message in result.errors.items():
-                st.warning(f"{display_label(component)}: {message}")
+            for component in result.errors:
+                st.warning(f"{display_label(component)} unavailable for this analysis.")
 
 
 st.set_page_config(
@@ -1303,6 +1308,11 @@ st.set_page_config(
     page_icon=None,
     layout="wide",
 )
+
+
+@st.dialog("X-ray viewer", width="large")
+def show_xray_viewer(image: Image.Image, caption: str) -> None:
+    st.image(image, caption=caption, use_container_width=True)
 
 page = current_page()
 if page == "home":
