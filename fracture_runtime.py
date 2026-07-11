@@ -75,6 +75,8 @@ class FractureResult:
     low_confidence_fracture_detections: tuple[Detection, ...]
     anatomy_detections: tuple[Detection, ...]
     fracture_status: Classification | None
+    fracture_status_visible: bool
+    fracture_status_suppression_reason: str | None
     anatomy_context: Classification | None
     anatomy_context_display_labels: tuple[str, ...]
     view_context: Classification | None
@@ -477,30 +479,29 @@ def _display_anatomy_labels(
     )
 
 
+def _fracture_status_display_policy(
+    fractures: tuple[Detection, ...],
+    status_result: Classification | None,
+) -> tuple[bool, str | None]:
+    if status_result is None:
+        return False, None
+    if fractures and status_result.primary_label == "no_fracture":
+        return (
+            False,
+            "The secondary whole-image fracture-status result disagreed with "
+            "localized fracture evidence and was suppressed from the normal result "
+            "view. The raw prediction remains available in the JSON audit file; "
+            "clinical review is required.",
+        )
+    return True, None
+
+
 def _model_disagreement(
     fractures: tuple[Detection, ...],
     status_result: Classification | None,
 ) -> str | None:
-    if status_result is None:
-        return None
-    if fractures and status_result.primary_label == "no_fracture":
-        return (
-            "Model disagreement: the localized fracture detector found "
-            f"{len(fractures)} box(es), while the secondary whole-image classifier "
-            f"favored No Fracture ({status_result.confidence:.1%}). Localized detector "
-            "findings drive the displayed status; clinical review is required."
-        )
-    if (
-        not fractures
-        and status_result.primary_label == "fracture"
-        and status_result.confidence >= status_result.thresholds["fracture"]
-    ):
-        return (
-            "Model disagreement: the secondary whole-image classifier favored Fracture "
-            f"({status_result.confidence:.1%}), but the detector did not localize a "
-            "fracture box. Clinical review is required."
-        )
-    return None
+    _, suppression_reason = _fracture_status_display_policy(fractures, status_result)
+    return suppression_reason
 
 
 def _combined_overlay(
@@ -624,7 +625,10 @@ def analyze_fracture_image(
         anatomy_context,
         anatomy_context_display_confidence,
     )
-    model_disagreement = _model_disagreement(fractures, status_result)
+    fracture_status_visible, fracture_status_suppression_reason = (
+        _fracture_status_display_policy(fractures, status_result)
+    )
+    model_disagreement = fracture_status_suppression_reason
 
     return FractureResult(
         status=status,
@@ -654,6 +658,8 @@ def analyze_fracture_image(
         low_confidence_fracture_detections=low_confidence_fractures,
         anatomy_detections=anatomy,
         fracture_status=status_result,
+        fracture_status_visible=fracture_status_visible,
+        fracture_status_suppression_reason=fracture_status_suppression_reason,
         anatomy_context=anatomy_context,
         anatomy_context_display_labels=anatomy_context_display_labels,
         view_context=view_context,

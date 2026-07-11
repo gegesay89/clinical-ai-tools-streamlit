@@ -29,16 +29,29 @@ Artifact-backed held-out results:
 
 - Fracture YOLO: precision 87.1%, recall 89.1%, F1 88.1% at confidence 0.25.
 - Anatomy-region YOLO: precision 97.7%, recall 99.5%, F1 98.6%.
+- Whole-image fracture-status classifier: macro F1 65.4%, weighted F1 67.9%;
+  fracture F1 77.0% and no-fracture F1 53.7%.
 - Anatomy context classifier: macro F1 97.3% on 2,622 test images.
 - View classifier: macro F1 93.0% on 2,412 test images.
+
+The anatomy-region score is annotation-limited: 2,228 of 2,622 test images use
+documented weak, source-derived foreground boxes rather than expert individual-
+bone boxes. Anatomy context is also source-confounded because the pooled test set
+contains wrist-only and elbow-only sources. For view classification, frontal and
+lateral F1 are 98.6% and 99.0%; oblique F1 is 81.4% on only 31 examples. The
+experimental pediatric-wrist silver subtype model is not deployed.
 
 The fixed-point fracture evaluation uses confidence 0.25. The interface marks
 localized boxes at or above 0.40 as primary red findings and retained boxes from
 0.25 to below 0.40 as amber low-confidence candidates. The whole-image fracture
-classifier is a secondary fallback, cannot override a localized box, and any
-disagreement is shown explicitly. Anatomy-region YOLO boxes are kept separate
-from whole-image anatomy context; context labels below the 0.50 display floor
-remain in downloaded JSON but are suppressed from the normal result view.
+classifier is a secondary fallback and cannot override a localized box. If it
+contradicts localized fracture evidence, its exact label and confidence are
+suppressed from the normal interface; a generic warning is shown and the raw
+prediction remains in downloaded JSON. A no-box result may still appear as a
+clearly labeled fallback because absence of a box is not a calibrated negative
+diagnosis. Anatomy-region YOLO boxes are kept separate from whole-image anatomy
+context; context labels below the 0.50 display floor remain in downloaded JSON
+but are suppressed from the normal result view.
 
 The fracture tools are educational decision support and are not clinically
 validated diagnostic systems.

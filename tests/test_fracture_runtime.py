@@ -7,6 +7,7 @@ from fracture_runtime import (
     Classification,
     Detection,
     _display_anatomy_labels,
+    _fracture_status_display_policy,
     _model_disagreement,
     _overlay,
     _split_fracture_detections,
@@ -84,8 +85,43 @@ def test_detector_classifier_disagreement_is_reported() -> None:
         thresholds={"fracture": 0.50, "no_fracture": 0.50},
     )
 
+    visible, suppression_reason = _fracture_status_display_policy((detection,), status)
     disagreement = _model_disagreement((detection,), status)
 
+    assert visible is False
+    assert suppression_reason == disagreement
     assert disagreement is not None
-    assert "localized fracture detector found 1 box" in disagreement
-    assert "favored No Fracture (78.0%)" in disagreement
+    assert "suppressed from the normal result view" in disagreement
+    assert "No Fracture" not in disagreement
+    assert "78.0%" not in disagreement
+
+
+def test_agreeing_classifier_result_remains_visible() -> None:
+    detection = Detection(0, "fracture", 0.66, (10, 20, 30, 40))
+    status = Classification(
+        primary_label="fracture",
+        confidence=0.82,
+        accepted_labels=("fracture",),
+        probabilities={"fracture": 0.82, "no_fracture": 0.18},
+        thresholds={"fracture": 0.50, "no_fracture": 0.50},
+    )
+
+    visible, suppression_reason = _fracture_status_display_policy((detection,), status)
+
+    assert visible is True
+    assert suppression_reason is None
+
+
+def test_no_box_classifier_result_remains_visible_as_fallback() -> None:
+    status = Classification(
+        primary_label="fracture",
+        confidence=0.82,
+        accepted_labels=("fracture",),
+        probabilities={"fracture": 0.82, "no_fracture": 0.18},
+        thresholds={"fracture": 0.50, "no_fracture": 0.50},
+    )
+
+    visible, suppression_reason = _fracture_status_display_policy((), status)
+
+    assert visible is True
+    assert suppression_reason is None

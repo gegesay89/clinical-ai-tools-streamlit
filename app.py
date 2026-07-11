@@ -1155,20 +1155,17 @@ def render_fracture_tool() -> None:
         "candidates retained from the 0.25 evaluation threshold."
     )
 
-    st.subheader("Secondary fallback classifier")
-    status_col, fallback_note_col = st.columns(2)
-    if result.fracture_status is None:
-        status_col.metric("Whole-image fracture status", "Unavailable")
-    else:
+    if result.fracture_status_visible and result.fracture_status is not None:
+        st.subheader("Secondary fallback classifier")
+        status_col, fallback_note_col = st.columns(2)
         status_col.metric(
             "Whole-image fracture status",
             display_label(result.fracture_status.primary_label),
         )
         status_col.caption(f"Confidence: {result.fracture_status.confidence:.1%}")
-    fallback_note_col.info(
-        "This whole-image fallback cannot override a localized fracture box. "
-        "Any disagreement is shown explicitly above."
-    )
+        fallback_note_col.info(
+            "This whole-image fallback cannot override a localized fracture box."
+        )
 
     st.subheader("Anatomy interpretation")
     anatomy_box_col, anatomy_col, view_col = st.columns(3)
@@ -1269,6 +1266,10 @@ def render_fracture_tool() -> None:
         ),
         "anatomy_detections": [detection.__dict__ for detection in result.anatomy_detections],
         "fracture_status": result.fracture_status.__dict__ if result.fracture_status else None,
+        "fracture_status_visible": result.fracture_status_visible,
+        "fracture_status_suppression_reason": (
+            result.fracture_status_suppression_reason
+        ),
         "anatomy_context": result.anatomy_context.__dict__ if result.anatomy_context else None,
         "anatomy_context_display_labels": result.anatomy_context_display_labels,
         "view_context": result.view_context.__dict__ if result.view_context else None,
