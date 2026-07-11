@@ -85,7 +85,6 @@ FINDINGS_PALETTE = (
     (79, 70, 229),
 )
 SAMPLE_IMAGE = Path(__file__).parent / "assets" / "final_prediction_comparison.png"
-FRACTURE_SAMPLE_IMAGE = Path(__file__).parent / "assets" / "fracture_demo.png"
 FEEDBACK_ROOT = Path(os.environ.get("FEEDBACK_DIR", "feedback_submissions"))
 
 
@@ -1080,17 +1079,10 @@ def render_fracture_tool() -> None:
         type=["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"],
         key="fracture_xray_upload",
     )
-    if st.button("Use de-identified demo X-ray"):
-        st.session_state["fracture_use_demo"] = True
-    if uploaded_file is not None:
-        st.session_state["fracture_use_demo"] = False
-        source_bytes = uploaded_file.getvalue()
-        source_name = uploaded_file.name
-    elif st.session_state.get("fracture_use_demo") and FRACTURE_SAMPLE_IMAGE.exists():
-        source_bytes = FRACTURE_SAMPLE_IMAGE.read_bytes()
-        source_name = "GRAZPEDWRI-DX held-out demo"
-    else:
+    if uploaded_file is None:
         return
+    source_bytes = uploaded_file.getvalue()
+    source_name = uploaded_file.name
 
     try:
         source = Image.open(io.BytesIO(source_bytes))

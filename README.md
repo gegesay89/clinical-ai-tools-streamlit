@@ -22,8 +22,9 @@ repository is private, so the Space requires an `HF_TOKEN` secret with read
 access. Local development can instead set `FRACTURE_MODEL_ROOT` to a directory
 containing the model subdirectories.
 
-The bundled demo image is a de-identified held-out GRAZPEDWRI-DX radiograph and
-is included only for reproducible UI testing.
+The clinician interface accepts explicit user uploads only. The held-out
+GRAZPEDWRI-DX radiograph under `assets/` remains solely as an internal
+screenshot/test fixture and is not selectable in the application.
 
 Artifact-backed held-out results:
 
