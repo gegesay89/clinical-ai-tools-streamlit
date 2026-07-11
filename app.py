@@ -1045,12 +1045,16 @@ def render_fracture_tool() -> None:
         st.metric("Recall", "89.1%")
         st.metric("F1", "88.1%")
         fracture_confidence = st.slider(
-            "Fracture confidence",
+            "Candidate box threshold",
             min_value=0.05,
             max_value=0.90,
             value=0.25,
             step=0.05,
             key="fracture_confidence",
+            help=(
+                "The reported fixed-point evaluation uses 0.25. Boxes below the "
+                "0.40 primary display threshold are shown as low confidence."
+            ),
         )
         anatomy_confidence = st.slider(
             "Anatomy-box confidence",
@@ -1090,19 +1094,34 @@ def render_fracture_tool() -> None:
         return
 
     with st.spinner("Running fracture, anatomy, and context models"):
+        primary_fracture_confidence = float(
+            os.environ.get("FRACTURE_PRIMARY_CONFIDENCE", "0.40")
+        )
+        anatomy_context_display_confidence = float(
+            os.environ.get("FRACTURE_CONTEXT_DISPLAY_CONFIDENCE", "0.50")
+        )
         result = analyze_fracture_image(
             source,
             fracture_confidence=fracture_confidence,
             anatomy_confidence=anatomy_confidence,
+            primary_fracture_confidence=primary_fracture_confidence,
+            anatomy_context_display_confidence=anatomy_context_display_confidence,
             device=os.environ.get("FRACTURE_DEVICE", "cpu"),
         )
 
     if result.status == "Fracture Detected":
         st.error(result.status)
-    elif result.status == "Analysis Incomplete":
+    elif result.status in {
+        "Analysis Incomplete",
+        "Fracture Suspected - Low Confidence Box",
+        "Fracture Suspected - No Localized Box",
+    }:
         st.warning(result.status)
     else:
         st.success(result.status)
+
+    if result.model_disagreement:
+        st.warning(result.model_disagreement)
 
     fracture_max = max(
         (detection.confidence for detection in result.fracture_detections),
@@ -1112,27 +1131,78 @@ def render_fracture_tool() -> None:
         (detection.confidence for detection in result.anatomy_detections),
         default=None,
     )
-    status_col, box_col = st.columns(2)
+    primary_col, low_confidence_col, box_col, anatomy_box_col = st.columns(4)
+    primary_col.metric(
+        "Primary fracture boxes",
+        len(result.primary_fracture_detections),
+    )
+    low_confidence_col.metric(
+        "Low-confidence boxes",
+        len(result.low_confidence_fracture_detections),
+    )
+    box_col.metric(
+        "Top localized fracture",
+        f"{fracture_max:.1%}" if fracture_max is not None else "No box",
+    )
+    anatomy_box_col.metric(
+        "Top anatomy-region box",
+        f"{anatomy_max:.1%}" if anatomy_max is not None else "No box",
+    )
+
+    st.caption(
+        "Red boxes are primary findings at or above "
+        f"{result.primary_fracture_confidence:.0%}; amber boxes are lower-confidence "
+        "candidates retained from the 0.25 evaluation threshold."
+    )
+
+    st.subheader("Secondary fallback classifier")
+    status_col, fallback_note_col = st.columns(2)
     if result.fracture_status is None:
-        status_col.metric("Fracture status head", "Unavailable")
+        status_col.metric("Whole-image fracture status", "Unavailable")
     else:
         status_col.metric(
-            "Fracture status head",
+            "Whole-image fracture status",
             display_label(result.fracture_status.primary_label),
         )
         status_col.caption(f"Confidence: {result.fracture_status.confidence:.1%}")
-    box_col.metric(
-        "Fracture box confidence",
-        f"{fracture_max:.1%}" if fracture_max is not None else "No box",
+    fallback_note_col.info(
+        "This whole-image fallback cannot override a localized fracture box. "
+        "Any disagreement is shown explicitly above."
     )
-    anatomy_col, view_col = st.columns(2)
-    if result.anatomy_context is None:
-        anatomy_col.metric("Anatomy context", "Unavailable")
+
+    st.subheader("Anatomy interpretation")
+    anatomy_box_col, anatomy_col, view_col = st.columns(3)
+    if result.anatomy_detections:
+        top_anatomy = max(
+            result.anatomy_detections,
+            key=lambda detection: detection.confidence,
+        )
+        anatomy_box_col.metric(
+            "Anatomy-region YOLO",
+            display_label(top_anatomy.class_name),
+        )
+        anatomy_box_col.caption(f"Box confidence: {top_anatomy.confidence:.1%}")
     else:
-        anatomy_col.metric("Anatomy context confidence", f"{result.anatomy_context.confidence:.1%}")
-        anatomy_col.caption(display_label(result.anatomy_context.primary_label))
-        if not result.anatomy_context.accepted_labels:
-            anatomy_col.caption("Below validation threshold")
+        anatomy_box_col.metric("Anatomy-region YOLO", "No box")
+    if result.anatomy_context is None:
+        anatomy_col.metric("Whole-image anatomy context", "Unavailable")
+    elif result.anatomy_context_display_labels:
+        anatomy_col.metric(
+            "Whole-image anatomy context",
+            display_label(result.anatomy_context_display_labels[0]),
+        )
+        anatomy_col.caption(
+            ", ".join(
+                f"{display_label(label)} {result.anatomy_context.probabilities[label]:.1%}"
+                for label in result.anatomy_context_display_labels
+            )
+        )
+    else:
+        anatomy_col.metric("Whole-image anatomy context", "No displayed label")
+        anatomy_col.caption(
+            "No accepted anatomy label reached the "
+            f"{result.anatomy_context_display_confidence:.0%} display floor."
+        )
     if result.view_context is None:
         view_col.metric("Radiographic view", "Unavailable")
     else:
@@ -1140,6 +1210,12 @@ def render_fracture_tool() -> None:
         view_col.caption(display_label(result.view_context.primary_label))
         if not result.view_context.accepted_labels:
             view_col.caption("Below validation threshold")
+
+    st.info(
+        "Anatomy-region YOLO boxes describe broad visible regions and can include "
+        "documented source-derived weak labels. They are not precise bone segmentation "
+        "or expert-drawn bone boundaries."
+    )
 
     source_col, combined_col = st.columns(2)
     source_col.image(result.source, caption="Original X-ray", use_container_width=True)
@@ -1152,13 +1228,13 @@ def render_fracture_tool() -> None:
         fracture_col, anatomy_box_col = st.columns(2)
         fracture_col.image(
             result.fracture_overlay,
-            caption="Fracture detector",
+            caption="Fracture detector: red primary, amber low confidence",
             use_container_width=True,
         )
         anatomy_box_col.image(
             result.anatomy_overlay,
             caption=(
-                "Anatomy-region detector"
+                "Anatomy-region detector: broad region box"
                 + (f" ({anatomy_max:.1%})" if anatomy_max is not None else "")
             ),
             use_container_width=True,
@@ -1166,11 +1242,37 @@ def render_fracture_tool() -> None:
 
     payload = {
         "status": result.status,
-        "fracture_detections": [detection.__dict__ for detection in result.fracture_detections],
+        "interpretation_policy": {
+            "candidate_box_threshold": fracture_confidence,
+            "fixed_point_evaluation_threshold": 0.25,
+            "primary_fracture_display_threshold": result.primary_fracture_confidence,
+            "anatomy_context_display_floor": (
+                result.anatomy_context_display_confidence
+            ),
+        },
+        "fracture_detections": [
+            {
+                **detection.__dict__,
+                "confidence_tier": (
+                    "primary"
+                    if detection.confidence >= result.primary_fracture_confidence
+                    else "low_confidence"
+                ),
+            }
+            for detection in result.fracture_detections
+        ],
+        "primary_fracture_detection_count": len(
+            result.primary_fracture_detections
+        ),
+        "low_confidence_fracture_detection_count": len(
+            result.low_confidence_fracture_detections
+        ),
         "anatomy_detections": [detection.__dict__ for detection in result.anatomy_detections],
         "fracture_status": result.fracture_status.__dict__ if result.fracture_status else None,
         "anatomy_context": result.anatomy_context.__dict__ if result.anatomy_context else None,
+        "anatomy_context_display_labels": result.anatomy_context_display_labels,
         "view_context": result.view_context.__dict__ if result.view_context else None,
+        "model_disagreement": result.model_disagreement,
         "errors": result.errors,
         "medical_disclaimer": MEDICAL_DISCLAIMER,
     }

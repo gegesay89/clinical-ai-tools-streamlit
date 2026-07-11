@@ -35,6 +35,7 @@ MODEL_FILES = {
 }
 
 FRACTURE_COLOR = (220, 38, 38)
+LOW_CONFIDENCE_FRACTURE_COLOR = (217, 119, 6)
 ANATOMY_PALETTE = (
     (8, 122, 93),
     (37, 99, 235),
@@ -70,10 +71,16 @@ class FractureResult:
     anatomy_overlay: Image.Image
     combined_overlay: Image.Image
     fracture_detections: tuple[Detection, ...]
+    primary_fracture_detections: tuple[Detection, ...]
+    low_confidence_fracture_detections: tuple[Detection, ...]
     anatomy_detections: tuple[Detection, ...]
     fracture_status: Classification | None
     anatomy_context: Classification | None
+    anatomy_context_display_labels: tuple[str, ...]
     view_context: Classification | None
+    primary_fracture_confidence: float
+    anatomy_context_display_confidence: float
+    model_disagreement: str | None
     errors: dict[str, str]
 
 
@@ -370,14 +377,24 @@ def _label_box(
     draw.text((label_x + 4, label_y + 3), label, fill="white", font=font)
 
 
-def _banner(image: Image.Image, label: str, color: tuple[int, int, int]) -> None:
+def _banner(
+    image: Image.Image,
+    label: str,
+    color: tuple[int, int, int],
+    *,
+    bottom: bool = False,
+) -> None:
     draw = ImageDraw.Draw(image)
     font = ImageFont.load_default()
     bounds = draw.textbbox((0, 0), label, font=font)
     label_width = min(image.width - 16, bounds[2] - bounds[0] + 18)
     label_height = bounds[3] - bounds[1] + 12
-    draw.rectangle((8, 8, 8 + label_width, 8 + label_height), fill=color)
-    draw.text((17, 14), label, fill="white", font=font)
+    label_y = max(8, image.height - label_height - 8) if bottom else 8
+    draw.rectangle(
+        (8, label_y, 8 + label_width, label_y + label_height),
+        fill=color,
+    )
+    draw.text((17, label_y + 6), label, fill="white", font=font)
 
 
 def _overlay(
@@ -387,6 +404,7 @@ def _overlay(
     colors: tuple[tuple[int, int, int], ...],
     empty_label: str,
     forced_prefix: str | None = None,
+    include_class_name_with_prefix: bool = False,
 ) -> Image.Image:
     output = image.copy()
     draw = ImageDraw.Draw(output)
@@ -394,14 +412,95 @@ def _overlay(
         _banner(output, empty_label, (44, 51, 49))
         return output
     for detection in detections:
+        label_name = forced_prefix
+        if forced_prefix and include_class_name_with_prefix:
+            label_name = f"{forced_prefix}: {display_label(detection.class_name)}"
         _label_box(
             draw,
             output.size,
             detection,
             colors[detection.class_id % len(colors)],
-            forced_prefix,
+            label_name,
         )
     return output
+
+
+def _fracture_overlay(
+    image: Image.Image,
+    detections: tuple[Detection, ...],
+    primary_confidence: float,
+) -> Image.Image:
+    output = image.copy()
+    draw = ImageDraw.Draw(output)
+    if not detections:
+        _banner(output, "No Localized Fracture Box", (44, 51, 49))
+        return output
+    for detection in detections:
+        is_primary = detection.confidence >= primary_confidence
+        _label_box(
+            draw,
+            output.size,
+            detection,
+            FRACTURE_COLOR if is_primary else LOW_CONFIDENCE_FRACTURE_COLOR,
+            "Fracture" if is_primary else "Low-confidence fracture",
+        )
+    return output
+
+
+def _split_fracture_detections(
+    detections: tuple[Detection, ...],
+    primary_confidence: float,
+) -> tuple[tuple[Detection, ...], tuple[Detection, ...]]:
+    primary = tuple(
+        detection
+        for detection in detections
+        if detection.confidence >= primary_confidence
+    )
+    low_confidence = tuple(
+        detection
+        for detection in detections
+        if detection.confidence < primary_confidence
+    )
+    return primary, low_confidence
+
+
+def _display_anatomy_labels(
+    classification: Classification | None,
+    display_confidence: float,
+) -> tuple[str, ...]:
+    if classification is None:
+        return ()
+    return tuple(
+        label
+        for label in classification.accepted_labels
+        if classification.probabilities[label] >= display_confidence
+    )
+
+
+def _model_disagreement(
+    fractures: tuple[Detection, ...],
+    status_result: Classification | None,
+) -> str | None:
+    if status_result is None:
+        return None
+    if fractures and status_result.primary_label == "no_fracture":
+        return (
+            "Model disagreement: the localized fracture detector found "
+            f"{len(fractures)} box(es), while the secondary whole-image classifier "
+            f"favored No Fracture ({status_result.confidence:.1%}). Localized detector "
+            "findings drive the displayed status; clinical review is required."
+        )
+    if (
+        not fractures
+        and status_result.primary_label == "fracture"
+        and status_result.confidence >= status_result.thresholds["fracture"]
+    ):
+        return (
+            "Model disagreement: the secondary whole-image classifier favored Fracture "
+            f"({status_result.confidence:.1%}), but the detector did not localize a "
+            "fracture box. Clinical review is required."
+        )
+    return None
 
 
 def _combined_overlay(
@@ -409,6 +508,7 @@ def _combined_overlay(
     fractures: tuple[Detection, ...],
     anatomy: tuple[Detection, ...],
     status: str,
+    primary_confidence: float,
 ) -> Image.Image:
     output = image.copy()
     draw = ImageDraw.Draw(output)
@@ -418,10 +518,28 @@ def _combined_overlay(
             output.size,
             detection,
             ANATOMY_PALETTE[detection.class_id % len(ANATOMY_PALETTE)],
+            f"Anatomy region: {display_label(detection.class_name)}",
         )
     for detection in fractures:
-        _label_box(draw, output.size, detection, FRACTURE_COLOR, "Fracture")
-    _banner(output, status, FRACTURE_COLOR if fractures else (44, 51, 49))
+        is_primary = detection.confidence >= primary_confidence
+        _label_box(
+            draw,
+            output.size,
+            detection,
+            FRACTURE_COLOR if is_primary else LOW_CONFIDENCE_FRACTURE_COLOR,
+            "Fracture" if is_primary else "Low-confidence fracture",
+        )
+    has_primary = any(
+        detection.confidence >= primary_confidence for detection in fractures
+    )
+    banner_color = (
+        FRACTURE_COLOR
+        if has_primary
+        else LOW_CONFIDENCE_FRACTURE_COLOR
+        if fractures
+        else (44, 51, 49)
+    )
+    _banner(output, status, banner_color, bottom=True)
     return output
 
 
@@ -429,6 +547,8 @@ def analyze_fracture_image(
     image: Image.Image,
     fracture_confidence: float = 0.25,
     anatomy_confidence: float = 0.25,
+    primary_fracture_confidence: float = 0.40,
+    anatomy_context_display_confidence: float = 0.50,
     device: str = "cpu",
 ) -> FractureResult:
     source = normalize_xray_to_rgb(image)
@@ -482,8 +602,14 @@ def analyze_fracture_image(
     except Exception as error:  # noqa: BLE001
         errors["view_context"] = str(error)
 
-    if fractures:
+    primary_fractures, low_confidence_fractures = _split_fracture_detections(
+        fractures,
+        primary_fracture_confidence,
+    )
+    if primary_fractures:
         status = "Fracture Detected"
+    elif low_confidence_fractures:
+        status = "Fracture Suspected - Low Confidence Box"
     elif (
         status_result is not None
         and status_result.primary_label == "fracture"
@@ -494,28 +620,45 @@ def analyze_fracture_image(
         status = "Analysis Incomplete"
     else:
         status = "No Fracture Detected"
+    anatomy_context_display_labels = _display_anatomy_labels(
+        anatomy_context,
+        anatomy_context_display_confidence,
+    )
+    model_disagreement = _model_disagreement(fractures, status_result)
 
     return FractureResult(
         status=status,
         source=source,
-        fracture_overlay=_overlay(
+        fracture_overlay=_fracture_overlay(
             source,
             fractures,
-            colors=(FRACTURE_COLOR,),
-            empty_label="No Fracture Box Detected",
-            forced_prefix="Fracture",
+            primary_fracture_confidence,
         ),
         anatomy_overlay=_overlay(
             source,
             anatomy,
             colors=ANATOMY_PALETTE,
             empty_label="No Anatomy Region Detected",
+            forced_prefix="Anatomy region",
+            include_class_name_with_prefix=True,
         ),
-        combined_overlay=_combined_overlay(source, fractures, anatomy, status),
+        combined_overlay=_combined_overlay(
+            source,
+            fractures,
+            anatomy,
+            status,
+            primary_fracture_confidence,
+        ),
         fracture_detections=fractures,
+        primary_fracture_detections=primary_fractures,
+        low_confidence_fracture_detections=low_confidence_fractures,
         anatomy_detections=anatomy,
         fracture_status=status_result,
         anatomy_context=anatomy_context,
+        anatomy_context_display_labels=anatomy_context_display_labels,
         view_context=view_context,
+        primary_fracture_confidence=primary_fracture_confidence,
+        anatomy_context_display_confidence=anatomy_context_display_confidence,
+        model_disagreement=model_disagreement,
         errors=errors,
     )

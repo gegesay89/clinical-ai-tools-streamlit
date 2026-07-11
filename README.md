@@ -32,6 +32,14 @@ Artifact-backed held-out results:
 - Anatomy context classifier: macro F1 97.3% on 2,622 test images.
 - View classifier: macro F1 93.0% on 2,412 test images.
 
+The fixed-point fracture evaluation uses confidence 0.25. The interface marks
+localized boxes at or above 0.40 as primary red findings and retained boxes from
+0.25 to below 0.40 as amber low-confidence candidates. The whole-image fracture
+classifier is a secondary fallback, cannot override a localized box, and any
+disagreement is shown explicitly. Anatomy-region YOLO boxes are kept separate
+from whole-image anatomy context; context labels below the 0.50 display floor
+remain in downloaded JSON but are suppressed from the normal result view.
+
 The fracture tools are educational decision support and are not clinically
 validated diagnostic systems.
 
