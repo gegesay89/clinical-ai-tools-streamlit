@@ -1,10 +1,41 @@
 ---
-title: Dental Tooth Segmentation U-Net
+title: Clinical AI Tools
 sdk: docker
 pinned: false
 ---
 
-# Dental Tooth Segmentation U-Net
+# Clinical AI Tools
+
+The home page provides three independent workflows:
+
+1. Medical DOCX English-to-French translation with Word structure preservation.
+2. Dental tooth segmentation, caries candidates, and dental findings.
+3. Orthopedic fracture localization, anatomy-region boxes, fracture status, broad
+   anatomy context, and radiographic view classification.
+
+## Orthopedic Fracture Detection
+
+The fracture workflow downloads five research checkpoints from
+`gegesay89/fracture-xray-models`: fracture YOLO, anatomy-region YOLO, fracture
+status classifier, anatomy context classifier, and view classifier. The model
+repository is private, so the Space requires an `HF_TOKEN` secret with read
+access. Local development can instead set `FRACTURE_MODEL_ROOT` to a directory
+containing the model subdirectories.
+
+The bundled demo image is a de-identified held-out GRAZPEDWRI-DX radiograph and
+is included only for reproducible UI testing.
+
+Artifact-backed held-out results:
+
+- Fracture YOLO: precision 87.1%, recall 89.1%, F1 88.1% at confidence 0.25.
+- Anatomy-region YOLO: precision 97.7%, recall 99.5%, F1 98.6%.
+- Anatomy context classifier: macro F1 97.3% on 2,622 test images.
+- View classifier: macro F1 93.0% on 2,412 test images.
+
+The fracture tools are educational decision support and are not clinically
+validated diagnostic systems.
+
+## Dental Tooth Segmentation U-Net
 
 Streamlit demo for a U-Net dental tooth segmentation model trained for the
 course assignment.

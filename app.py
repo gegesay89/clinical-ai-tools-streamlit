@@ -14,6 +14,16 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 import numpy as np
 import streamlit as st
 from caries_sliced import sliced_detect
+from docx_translate import (
+    BedrockOpenAITranslator,
+    TranslationProviderError,
+    translate_docx_bytes,
+)
+from fracture_runtime import (
+    MEDICAL_DISCLAIMER,
+    analyze_fracture_image,
+    display_label,
+)
 from huggingface_hub import hf_hub_download
 from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
@@ -75,6 +85,7 @@ FINDINGS_PALETTE = (
     (79, 70, 229),
 )
 SAMPLE_IMAGE = Path(__file__).parent / "assets" / "final_prediction_comparison.png"
+FRACTURE_SAMPLE_IMAGE = Path(__file__).parent / "assets" / "fracture_demo.png"
 FEEDBACK_ROOT = Path(os.environ.get("FEEDBACK_DIR", "feedback_submissions"))
 
 
@@ -896,11 +907,315 @@ def segment_image(image: Image.Image, threshold: float) -> tuple[Image.Image, Im
     return mask, overlay, foreground_fraction
 
 
+def docx_output_name(filename: str) -> str:
+    stem = Path(filename).stem or "translated"
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    return f"{cleaned or 'translated'}_fr.docx"
+
+
+def translator_is_unlocked() -> bool:
+    password = os.environ.get("TRANSLATOR_PASSWORD") or os.environ.get("APP_PASSWORD")
+    if not password:
+        st.warning("The Word translator is not configured yet.")
+        return False
+    if st.session_state.get("translator_unlocked"):
+        return True
+
+    entered = st.text_input("Translator password", type="password")
+    if entered == password:
+        st.session_state["translator_unlocked"] = True
+        st.success("Translator unlocked.")
+        return True
+    if entered:
+        st.error("Incorrect password.")
+    return False
+
+
+def render_docx_translator() -> None:
+    st.title("Medical DOCX French Translator")
+    if not translator_is_unlocked():
+        return
+
+    uploaded_docx = st.file_uploader(
+        "Word document",
+        type=["docx"],
+        key="docx_translator_upload",
+    )
+    translate_clicked = st.button(
+        "Translate DOCX",
+        type="primary",
+        disabled=uploaded_docx is None,
+    )
+    if not translate_clicked or uploaded_docx is None:
+        return
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    def update_progress(done: int, total: int, message: str) -> None:
+        progress.progress(done / total if total else 1.0)
+        status.write(message)
+
+    try:
+        translator = BedrockOpenAITranslator(
+            profile_name=os.environ.get("AWS_PROFILE") or None,
+            region_name=(
+                os.environ.get("AWS_REGION")
+                or os.environ.get("AWS_DEFAULT_REGION")
+                or "us-east-2"
+            ),
+            model_id=os.environ.get(
+                "BEDROCK_OPENAI_MODEL_ID",
+                "global.anthropic.claude-opus-4-7",
+            ),
+            max_tokens=4096,
+        )
+        translated_bytes, summary = translate_docx_bytes(
+            uploaded_docx.getvalue(),
+            translator,
+            source_language="English",
+            target_language="French",
+            mode="runs",
+            include_headers_footers=True,
+            include_notes_comments=True,
+            batch_size=10,
+            progress_callback=update_progress,
+        )
+    except (TranslationProviderError, ValueError) as error:
+        progress.empty()
+        status.empty()
+        st.error(f"Translation failed: {error}")
+        return
+    except Exception as error:  # noqa: BLE001
+        progress.empty()
+        status.empty()
+        st.error(f"Translation failed: {error}")
+        return
+
+    progress.progress(1.0)
+    status.write("Translation complete")
+    st.download_button(
+        "Download French DOCX",
+        data=translated_bytes,
+        file_name=docx_output_name(uploaded_docx.name),
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    st.success(f"Translated {summary.translated_units} text blocks.")
+
+
+def current_page() -> str:
+    page = st.query_params.get("page", "home")
+    if isinstance(page, list):
+        page = page[0] if page else "home"
+    return page if page in {"home", "translator", "dental", "fracture"} else "home"
+
+
+def go_to_page(page: str) -> None:
+    st.query_params["page"] = page
+    st.rerun()
+
+
+def render_home_page() -> None:
+    st.title("Clinical AI Tools")
+    translator_col, dental_col, fracture_col = st.columns(3)
+    with translator_col:
+        st.subheader("Medical DOCX French Translator")
+        st.write("Structure-preserving English-to-French Word translation.")
+        if st.button("Open Translator", type="primary", use_container_width=True):
+            go_to_page("translator")
+    with dental_col:
+        st.subheader("Dental Segmentation and Caries")
+        st.write("Tooth masks, caries candidates, and dental findings.")
+        if st.button("Open Dental Tool", use_container_width=True):
+            go_to_page("dental")
+    with fracture_col:
+        st.subheader("Orthopedic Fracture Detection")
+        st.write("Fracture boxes, anatomy regions, and radiographic view context.")
+        if st.button("Open Fracture Tool", use_container_width=True):
+            go_to_page("fracture")
+
+
+def render_fracture_tool() -> None:
+    st.title("Orthopedic Fracture Detection")
+    st.warning(MEDICAL_DISCLAIMER)
+
+    with st.sidebar:
+        st.subheader("Fracture YOLO")
+        st.metric("Precision", "87.1%")
+        st.metric("Recall", "89.1%")
+        st.metric("F1", "88.1%")
+        fracture_confidence = st.slider(
+            "Fracture confidence",
+            min_value=0.05,
+            max_value=0.90,
+            value=0.25,
+            step=0.05,
+            key="fracture_confidence",
+        )
+        anatomy_confidence = st.slider(
+            "Anatomy-box confidence",
+            min_value=0.05,
+            max_value=0.90,
+            value=0.25,
+            step=0.05,
+            key="fracture_anatomy_confidence",
+        )
+
+    uploaded_file = st.file_uploader(
+        "Orthopedic X-ray",
+        type=["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"],
+        key="fracture_xray_upload",
+    )
+    if st.button("Use de-identified demo X-ray"):
+        st.session_state["fracture_use_demo"] = True
+    if uploaded_file is not None:
+        st.session_state["fracture_use_demo"] = False
+        image_bytes = io.BytesIO(uploaded_file.getvalue())
+        source_name = uploaded_file.name
+    elif st.session_state.get("fracture_use_demo") and FRACTURE_SAMPLE_IMAGE.exists():
+        image_bytes = FRACTURE_SAMPLE_IMAGE
+        source_name = "GRAZPEDWRI-DX held-out demo"
+    else:
+        return
+
+    try:
+        source = Image.open(image_bytes)
+        source.load()
+    except Exception as error:  # noqa: BLE001
+        st.error(f"Could not read this image: {error}")
+        return
+
+    if not st.button("Run fracture analysis", type="primary"):
+        st.image(source, caption=source_name, width=520)
+        return
+
+    with st.spinner("Running fracture, anatomy, and context models"):
+        result = analyze_fracture_image(
+            source,
+            fracture_confidence=fracture_confidence,
+            anatomy_confidence=anatomy_confidence,
+            device=os.environ.get("FRACTURE_DEVICE", "cpu"),
+        )
+
+    if result.status == "Fracture Detected":
+        st.error(result.status)
+    elif result.status == "Analysis Incomplete":
+        st.warning(result.status)
+    else:
+        st.success(result.status)
+
+    fracture_max = max(
+        (detection.confidence for detection in result.fracture_detections),
+        default=None,
+    )
+    anatomy_max = max(
+        (detection.confidence for detection in result.anatomy_detections),
+        default=None,
+    )
+    status_col, box_col = st.columns(2)
+    if result.fracture_status is None:
+        status_col.metric("Fracture status head", "Unavailable")
+    else:
+        status_col.metric(
+            "Fracture status head",
+            display_label(result.fracture_status.primary_label),
+        )
+        status_col.caption(f"Confidence: {result.fracture_status.confidence:.1%}")
+    box_col.metric(
+        "Fracture box confidence",
+        f"{fracture_max:.1%}" if fracture_max is not None else "No box",
+    )
+    anatomy_col, view_col = st.columns(2)
+    if result.anatomy_context is None:
+        anatomy_col.metric("Anatomy context", "Unavailable")
+    else:
+        anatomy_col.metric("Anatomy context confidence", f"{result.anatomy_context.confidence:.1%}")
+        anatomy_col.caption(display_label(result.anatomy_context.primary_label))
+        if not result.anatomy_context.accepted_labels:
+            anatomy_col.caption("Below validation threshold")
+    if result.view_context is None:
+        view_col.metric("Radiographic view", "Unavailable")
+    else:
+        view_col.metric("View confidence", f"{result.view_context.confidence:.1%}")
+        view_col.caption(display_label(result.view_context.primary_label))
+        if not result.view_context.accepted_labels:
+            view_col.caption("Below validation threshold")
+
+    source_col, combined_col = st.columns(2)
+    source_col.image(result.source, caption="Original X-ray", use_container_width=True)
+    combined_col.image(
+        result.combined_overlay,
+        caption="Combined fracture and anatomy overlay",
+        use_container_width=True,
+    )
+    with st.expander("Separate model overlays"):
+        fracture_col, anatomy_box_col = st.columns(2)
+        fracture_col.image(
+            result.fracture_overlay,
+            caption="Fracture detector",
+            use_container_width=True,
+        )
+        anatomy_box_col.image(
+            result.anatomy_overlay,
+            caption=(
+                "Anatomy-region detector"
+                + (f" ({anatomy_max:.1%})" if anatomy_max is not None else "")
+            ),
+            use_container_width=True,
+        )
+
+    payload = {
+        "status": result.status,
+        "fracture_detections": [detection.__dict__ for detection in result.fracture_detections],
+        "anatomy_detections": [detection.__dict__ for detection in result.anatomy_detections],
+        "fracture_status": result.fracture_status.__dict__ if result.fracture_status else None,
+        "anatomy_context": result.anatomy_context.__dict__ if result.anatomy_context else None,
+        "view_context": result.view_context.__dict__ if result.view_context else None,
+        "errors": result.errors,
+        "medical_disclaimer": MEDICAL_DISCLAIMER,
+    }
+    download_col, json_col = st.columns(2)
+    download_col.download_button(
+        "Download combined overlay",
+        data=image_to_png_bytes(result.combined_overlay),
+        file_name="fracture_analysis_overlay.png",
+        mime="image/png",
+        use_container_width=True,
+    )
+    json_col.download_button(
+        "Download analysis JSON",
+        data=json.dumps(payload, indent=2),
+        file_name="fracture_analysis.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    if result.errors:
+        with st.expander("Model availability details"):
+            for component, message in result.errors.items():
+                st.warning(f"{display_label(component)}: {message}")
+
+
 st.set_page_config(
-    page_title="Dental Segmentation and Caries Arrows",
+    page_title="Clinical AI Tools",
     page_icon=None,
     layout="wide",
 )
+
+page = current_page()
+if page == "home":
+    render_home_page()
+    st.stop()
+
+if st.button("Back to home"):
+    go_to_page("home")
+
+if page == "translator":
+    render_docx_translator()
+    st.stop()
+
+if page == "fracture":
+    render_fracture_tool()
+    st.stop()
 
 st.title("Dental Tooth Segmentation and Caries Arrows")
 
