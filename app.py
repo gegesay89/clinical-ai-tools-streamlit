@@ -1137,9 +1137,6 @@ def render_fracture_tool() -> None:
     else:
         st.success(result.status)
 
-    if result.model_disagreement:
-        st.warning(result.model_disagreement)
-
     fracture_max = max(
         (detection.confidence for detection in result.fracture_detections),
         default=None,

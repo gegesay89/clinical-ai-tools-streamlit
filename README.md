@@ -47,8 +47,8 @@ localized boxes at or above 0.40 as primary red findings and retained boxes from
 0.25 to below 0.40 as amber low-confidence candidates. The whole-image fracture
 classifier is a secondary fallback and cannot override a localized box. If it
 contradicts localized fracture evidence, its exact label and confidence are
-suppressed from the normal interface; a generic warning is shown and the raw
-prediction remains in downloaded JSON. A no-box result may still appear as a
+suppressed from the normal interface and the raw prediction remains in
+downloaded JSON. A no-box result may still appear as a
 clearly labeled fallback because absence of a box is not a calibrated negative
 diagnosis. Anatomy-region YOLO boxes remain in downloaded JSON and a technical
 audit artifact, but are not drawn on the physician-facing X-ray because most
