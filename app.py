@@ -1048,10 +1048,11 @@ def render_fracture_tool() -> None:
                 "**Radiographic view** · ResNet-18"
             )
             st.caption("Validated fracture detector")
-            metric_precision, metric_recall, metric_f1 = st.columns(3)
-            metric_precision.metric("Precision", "87.1%")
-            metric_recall.metric("Recall", "89.1%")
-            metric_f1.metric("F1", "88.1%")
+            st.markdown(
+                "| Precision | Recall | F1 |\n"
+                "|:--:|:--:|:--:|\n"
+                "| **87.1%** | **89.1%** | **88.1%** |"
+            )
             fracture_confidence = st.slider(
                 "Candidate box threshold",
                 min_value=0.05,
