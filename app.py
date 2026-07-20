@@ -17,6 +17,7 @@ from caries_sliced import sliced_detect
 from docx_translate import (
     BedrockOpenAITranslator,
     TranslationProviderError,
+    bedrock_translation_enabled,
     translate_docx_bytes,
 )
 from fracture_runtime import (
@@ -931,6 +932,9 @@ def translator_is_unlocked() -> bool:
 
 
 def render_docx_translator() -> None:
+    if not bedrock_translation_enabled():
+        return
+
     st.title("Medical DOCX French Translator")
     if not translator_is_unlocked():
         return
@@ -1006,7 +1010,10 @@ def current_page() -> str:
     page = st.query_params.get("page", "home")
     if isinstance(page, list):
         page = page[0] if page else "home"
-    return page if page in {"home", "translator", "dental", "fracture"} else "home"
+    available_pages = {"home", "dental", "fracture"}
+    if bedrock_translation_enabled():
+        available_pages.add("translator")
+    return page if page in available_pages else "home"
 
 
 def go_to_page(page: str) -> None:
@@ -1016,22 +1023,43 @@ def go_to_page(page: str) -> None:
 
 def render_home_page() -> None:
     st.title("Clinical AI Tools")
-    translator_col, dental_col, fracture_col = st.columns(3)
-    with translator_col:
-        st.subheader("Medical DOCX French Translator")
-        st.write("Structure-preserving English-to-French Word translation.")
-        if st.button("Open Translator", type="primary", use_container_width=True):
-            go_to_page("translator")
-    with dental_col:
-        st.subheader("Dental Segmentation and Caries")
-        st.write("Tooth masks, caries candidates, and dental findings.")
-        if st.button("Open Dental Tool", use_container_width=True):
-            go_to_page("dental")
-    with fracture_col:
-        st.subheader("Orthopedic Fracture Detection")
-        st.write("Fracture localization with anatomical and radiographic view context.")
-        if st.button("Open Fracture Tool", use_container_width=True):
-            go_to_page("fracture")
+    tools = [
+        (
+            "Dental Segmentation and Caries",
+            "Tooth masks, caries candidates, and dental findings.",
+            "Open Dental Tool",
+            "dental",
+        ),
+        (
+            "Orthopedic Fracture Detection",
+            "Fracture localization with anatomical and radiographic view context.",
+            "Open Fracture Tool",
+            "fracture",
+        ),
+    ]
+    if bedrock_translation_enabled():
+        tools.insert(
+            0,
+            (
+                "Medical DOCX French Translator",
+                "Structure-preserving English-to-French Word translation.",
+                "Open Translator",
+                "translator",
+            ),
+        )
+
+    columns = st.columns(len(tools))
+    for index, (column, tool) in enumerate(zip(columns, tools, strict=True)):
+        title, description, button_label, destination = tool
+        with column:
+            st.subheader(title)
+            st.write(description)
+            if st.button(
+                button_label,
+                type="primary" if index == 0 else "secondary",
+                use_container_width=True,
+            ):
+                go_to_page(destination)
 
 
 def render_fracture_tool() -> None:

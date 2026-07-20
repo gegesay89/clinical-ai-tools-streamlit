@@ -6,11 +6,10 @@ pinned: false
 
 # Clinical AI Tools
 
-The home page provides three independent workflows:
+The home page provides two independent workflows:
 
-1. Medical DOCX English-to-French translation with Word structure preservation.
-2. Dental tooth segmentation, caries candidates, and dental findings.
-3. Orthopedic fracture localization, secondary fracture status, anatomical
+1. Dental tooth segmentation, caries candidates, and dental findings.
+2. Orthopedic fracture localization, secondary fracture status, anatomical
    context, radiographic view classification, and audit-only anatomy regions.
 
 ## Orthopedic Fracture Detection

@@ -9,6 +9,7 @@ from .providers import (
     LocalMarianTranslator,
     OpenAITranslator,
     TranslationProviderError,
+    bedrock_translation_enabled,
     build_translator,
 )
 
@@ -21,6 +22,7 @@ __all__ = [
     "DocxTranslationSummary",
     "OpenAITranslator",
     "TranslationProviderError",
+    "bedrock_translation_enabled",
     "build_translator",
     "translate_docx_bytes",
 ]

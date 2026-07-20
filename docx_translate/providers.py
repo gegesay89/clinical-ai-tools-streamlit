@@ -35,6 +35,17 @@ class Translator(Protocol):
         """Translate a batch of strings."""
 
 
+def bedrock_translation_enabled() -> bool:
+    """Return whether the temporary Bedrock translation feature is enabled."""
+
+    return os.getenv("BEDROCK_TRANSLATION_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def build_translator(
     provider: str,
     *,
@@ -108,6 +119,8 @@ class BedrockOpenAITranslator:
         source_language: str,
         target_language: str,
     ) -> list[str]:
+        if not bedrock_translation_enabled():
+            raise TranslationProviderError("Bedrock translation is temporarily disabled.")
         if not texts:
             return []
 
